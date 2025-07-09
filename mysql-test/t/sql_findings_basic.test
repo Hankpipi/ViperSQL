@@ -1,0 +1,216 @@
+--source include/count_sessions.inc
+
+##########################################
+### create 2 normal users and 1 super user
+##########################################
+create user user1@localhost  identified by 'u1';
+grant alter, create, insert, select, drop on test.* to user1@localhost;
+GRANT SELECT ON performance_schema.* TO user1@localhost;
+
+create user user_super@localhost identified by 'su';
+grant all on *.* to user_super@localhost with grant option;
+
+#################################################
+### Case 0: show the sql_findings definition
+#################################################
+--echo -> Case 0: show the sql_findings definition
+
+describe performance_schema.sql_findings;
+
+#################################################
+### Case 1: both variables are default (OFF_HARD)
+#################################################
+--echo -> Case 1: sql findings is default (OFF_HARD)
+
+select @@sql_findings_control;
+
+connect (con11, localhost, user1,u1,test);
+set session sql_mode=NO_ENGINE_SUBSTITUTION;
+
+create table t1 (c1 char(2) PRIMARY KEY, c2 int unsigned)
+ engine=myisam;
+insert into t1 values('momo', -1);
+
+select * from t1 where c1=1;
+
+## no findings (normally we would see 2)
+--echo -> no findings captured
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings;
+
+##################################################
+### Case 2: both parameters are default (ON)
+##################################################
+--echo -> Case 2: sql findings is ON
+
+connect (con21, localhost, user_super,su,test);
+
+set @@GLOBAL.sql_findings_control=ON;
+select @@sql_findings_control;
+
+connect (con22, localhost, user1,u1,test);
+set session sql_mode=NO_ENGINE_SUBSTITUTION;
+
+create table t2 (c1 char(2) PRIMARY KEY, c2 int unsigned)
+ engine=myisam;
+--disable_warnings
+insert into t2 values('momo', -1);
+--enable_warnings
+
+## report truncation
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+--disable_warnings
+select * from t2 where c1=1;
+--enable_warnings
+
+## report type mismatch
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+create table t3 (c1 char(2) PRIMARY KEY) collate latin1_danish_ci
+ engine=myisam;
+insert into t3 values('zoro');
+
+## report truncation
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+--disable_warnings
+select * from t3 where c1=2;
+--enable_warnings
+
+## report type mismatch
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+################################
+### Case 3: multi-query scenario
+################################
+--echo -> Case 3: multi-query scenario
+
+connect (con31, localhost, user_super,su,test);
+set session sql_mode=NO_ENGINE_SUBSTITUTION;
+
+--disable_warnings
+delimiter ||||;
+
+create table t4(c1 char(2) PRIMARY KEY)
+ engine=myisam;
+insert into t4 values('case3');
+commit;
+select * from t4 where c1=1;
+drop table t4;
+||||
+
+# reset delimiter
+delimiter ;||||
+--enable_warnings
+
+## report findings: truncated, mismatch
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+###########################
+### Case 4: with size limit
+###########################
+--echo -> Case 4: with size limit
+
+connect (con41, localhost, user_super,su,test);
+
+## reduce the memory size limit (10MB -> 200 B)
+select @@max_sql_findings_size;
+set @@GLOBAL.max_sql_findings_size=333;
+select @@max_sql_findings_size;
+
+## all sql findings are gone
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+connect (con42, localhost, user1,u1,test);
+set session sql_mode=NO_ENGINE_SUBSTITUTION;
+
+create table t5(c1 char(2) PRIMARY KEY)
+ engine=myisam;
+--disable_warnings
+insert into t5 values('case4');
+select * from t5 where c1=1;
+--enable_warnings
+
+## only one sql finding reported (hit the size limit)
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+###########################
+### Case 5: table truncate
+###########################
+--echo -> Case 5: table truncate
+
+connect (con43, localhost, user_super,su,test);
+
+set session sql_mode=NO_ENGINE_SUBSTITUTION;
+set @@GLOBAL.sql_findings_control=ON;
+select @@sql_findings_control;
+
+create table t6(c1 char(2) PRIMARY KEY)
+ engine=myisam;
+--disable_warnings
+insert into t6 values('case4');
+select * from t6 where c1=1;
+--enable_warnings
+
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+# truncate table
+truncate performance_schema.sql_findings;
+
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+
+###########################
+### Case 6: When no table is passed
+###########################
+--error ER_USER_LOCK_WRONG_NAME
+select GET_LOCK("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 3);
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+# truncate table
+truncate performance_schema.sql_findings;
+
+select sql_id, code, message, query_text, count, db_name from performance_schema.sql_findings
+order by sql_id, code, query_text;
+
+###########
+### Cleanup
+###########
+--echo -> Cleanup
+
+connection default;
+
+set @@GLOBAL.sql_findings_control=DEFAULT;
+set @@GLOBAL.max_sql_findings_size=DEFAULT;
+
+drop table t1;
+drop table t2;
+drop table t3;
+drop table t5;
+drop table t6;
+drop user user1@localhost;
+drop user user_super@localhost;
+
+disconnect con11;
+
+disconnect con21;
+disconnect con22;
+
+disconnect con31;
+
+disconnect con41;
+disconnect con42;
+disconnect con43;
+
+# Check that all connections opened by test cases in this file are gone
+--source include/wait_until_count_sessions.inc

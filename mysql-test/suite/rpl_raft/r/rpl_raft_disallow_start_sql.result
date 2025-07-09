@@ -1,0 +1,38 @@
+include/raft_3_node.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the master info repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START SLAVE; see the 'START SLAVE Syntax' in the MySQL Manual for more information.
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the master info repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START SLAVE; see the 'START SLAVE Syntax' in the MySQL Manual for more information.
+[connection master]
+include/rpl_connect.inc [creating server_4]
+include/rpl_connect.inc [creating server_5]
+show status like 'rpl_raft_role';
+Variable_name	Value
+Rpl_raft_role	LEADER
+show status like 'rpl_raft_role';
+Variable_name	Value
+Rpl_raft_role	FOLLOWER
+reset master;
+show status like 'rpl_raft_role';
+Variable_name	Value
+Rpl_raft_role	FOLLOWER
+reset master;
+"server_1 is the initial leader"
+include/rpl_restart_server.inc [server_number=3 parameters: --override_enable_raft_check=0]
+set @@global.rpl_raft_reject_append_entries = 1;
+set @@global.rpl_raft_start_election = 1;
+"server1 running state : Yes"
+"server3 running state :  No"
+start replica sql_thread;
+ERROR HY000: This operation is not allowed since raft is enabled
+set @@global.rpl_raft_reject_append_entries = 0;
+"server3 running state now Yes"
+stop replica sql_thread;
+start replica sql_thread;
+set @@global.rpl_raft_start_election = 1;
+include/sync_slave_sql_with_master.inc
+include/sync_slave_sql_with_master.inc
+include/rpl_restart_server.inc [server_number=3 parameters: --override_enable_raft_check=1]
+include/rpl_end.inc

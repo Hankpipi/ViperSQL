@@ -1,0 +1,119 @@
+include/raft_3_node.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the master info repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START SLAVE; see the 'START SLAVE Syntax' in the MySQL Manual for more information.
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the master info repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START SLAVE; see the 'START SLAVE Syntax' in the MySQL Manual for more information.
+[connection master]
+include/rpl_connect.inc [creating server_4]
+include/rpl_connect.inc [creating server_5]
+show status like 'rpl_raft_role';
+Variable_name	Value
+Rpl_raft_role	LEADER
+show status like 'rpl_raft_role';
+Variable_name	Value
+Rpl_raft_role	FOLLOWER
+reset master;
+show status like 'rpl_raft_role';
+Variable_name	Value
+Rpl_raft_role	FOLLOWER
+reset master;
+RESET MASTER;
+RESET REPLICA;
+SET @@GLOBAL.ENABLE_RAFT_PLUGIN = 0;
+CHANGE REPLICATION SOURCE TO SOURCE_HOST = '::1', SOURCE_PORT = SERVER_MYPORT_1, SOURCE_USER = 'root',  SOURCE_CONNECT_RETRY = 1, SOURCE_AUTO_POSITION = 1;
+Warnings:
+Note	1759	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	1760	Storing MySQL user name or password information in the master info repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START SLAVE; see the 'START SLAVE Syntax' in the MySQL Manual for more information.
+START REPLICA;
+RESET MASTER;
+RESET REPLICA;
+SET @@GLOBAL.ENABLE_RAFT_PLUGIN = 0;
+CHANGE REPLICATION SOURCE TO SOURCE_HOST = '::1', SOURCE_PORT = SERVER_MYPORT_2, SOURCE_USER = 'root',  SOURCE_CONNECT_RETRY = 1, SOURCE_AUTO_POSITION = 1;
+Warnings:
+Note	1759	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	1760	Storing MySQL user name or password information in the master info repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START SLAVE; see the 'START SLAVE Syntax' in the MySQL Manual for more information.
+START REPLICA;
+create table t1 (a int primary key) engine = innodb;
+insert into t1 values(1);
+include/sync_slave_sql_with_master.inc
+include/sync_slave_sql_with_master.inc
+include/sync_slave_sql_with_master.inc
+include/sync_slave_sql_with_master.inc
+"SERVER 1"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+4	HOST	PORT	1	UUID	0	Async slave offset: binary-logs-13000.000002 157
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+2	HOST	PORT	1	UUID	0	RAFT
+3	HOST	PORT	1	UUID	0	RAFT
+4	HOST	PORT	1	UUID	0	Async slave offset: binary-logs-13000.000002 157
+"SERVER 2"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+5	HOST	PORT	2	UUID	0	Async slave offset: binary-logs-13001.000002 157
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+5	HOST	PORT	2	UUID	0	Async slave offset: binary-logs-13001.000002 157
+"SERVER 3"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+"SERVER 4"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+"SERVER 5"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+"Transferring leadership from SERVER 1 to SERVER 2"
+include/raft_promote_to_leader.inc
+"SERVER 1"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+4	HOST	PORT	1	UUID	0	Async slave offset: binary-logs-13000.000002 157
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+4	HOST	PORT	1	UUID	0	Async slave offset: binary-logs-13000.000002 157
+"SERVER 2"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+5	HOST	PORT	2	UUID	0	Async slave offset: binary-logs-13001.000002 853
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+1	HOST	PORT	2	UUID	0	RAFT
+3	HOST	PORT	2	UUID	0	RAFT
+5	HOST	PORT	2	UUID	0	Async slave offset: binary-logs-13001.000002 853
+"SERVER 3"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+"SERVER 4"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+"SERVER 5"
+SHOW REPLICAS;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+SHOW REPLICAS WITH RAFT;
+Server_Id	Host	Port	Source_Id	Replica_UUID	Is_Semi_Sync_Replica	Replication_status
+"Transferring leadership back to SERVER 1"
+include/raft_promote_to_leader.inc
+drop table t1;
+include/sync_slave_sql_with_master.inc
+include/sync_slave_sql_with_master.inc
+include/sync_slave_sql_with_master.inc
+include/sync_slave_sql_with_master.inc
+stop replica;
+reset replica all;
+stop replica;
+reset replica all;
+include/rpl_end.inc

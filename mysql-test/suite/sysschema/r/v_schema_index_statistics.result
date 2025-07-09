@@ -1,0 +1,28 @@
+DESC sys.schema_index_statistics;
+Field	Type	Null	Key	Default	Extra
+table_schema	varchar(64)	X		X	
+table_name	varchar(64)	X		X	
+index_name	varchar(64)	X		X	
+rows_selected	bigint unsigned	X		X	
+select_latency	varchar(11)	X		X	
+rows_inserted	bigint unsigned	X		X	
+insert_latency	varchar(11)	X		X	
+rows_updated	bigint unsigned	X		X	
+update_latency	varchar(11)	X		X	
+rows_deleted	bigint unsigned	X		X	
+delete_latency	varchar(11)	X		X	
+SELECT * FROM sys.schema_index_statistics;
+DESC sys.x$schema_index_statistics;
+Field	Type	Null	Key	Default	Extra
+table_schema	varchar(64)	X		X	
+table_name	varchar(64)	X		X	
+index_name	varchar(64)	X		X	
+rows_selected	bigint unsigned	X		X	
+select_latency	bigint unsigned	X		X	
+rows_inserted	bigint unsigned	X		X	
+insert_latency	bigint unsigned	X		X	
+rows_updated	bigint unsigned	X		X	
+update_latency	bigint unsigned	X		X	
+rows_deleted	bigint unsigned	X		X	
+delete_latency	bigint unsigned	X		X	
+SELECT * FROM sys.x$schema_index_statistics;

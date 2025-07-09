@@ -1,0 +1,172 @@
+--source include/have_rocksdb.inc
+
+--let $MYSQLD_DATADIR= `select @@datadir`
+--replace_result $TEST_BYPASS_RPC_PLUGIN TEST_BYPASS_RPC_PLUGIN
+--replace_result $MYSQLD_DATADIR MYSQLD_DATADIR
+SELECT @@rocksdb_bypass_rpc_on INTO @save_rocksdb_bypass_rpc_on;
+set global rocksdb_bypass_rpc_on=1;
+
+SELECT @@rocksdb_select_bypass_policy into @save_rocksdb_select_bypass_policy;
+SET GLOBAL rocksdb_select_bypass_policy=2;
+SELECT @@rocksdb_select_bypass_allow_filters into @save_rocksdb_select_bypass_allow_filters;
+SET GLOBAL rocksdb_select_bypass_allow_filters=0;
+
+SELECT @@rocksdb_bypass_rpc_log_rejected into @save_rocksdb_bypass_rpc_log_rejected;
+SET GLOBAL rocksdb_bypass_rpc_log_rejected=1;
+
+SELECT variable_value INTO @queries_executed_0 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_executed";
+SELECT variable_value INTO @queries_failed_0 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_failed";
+SELECT variable_value INTO @queries_rejected_0 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_rejected";
+
+create table t1 (pk INT PRIMARY KEY NOT NULL, a INT NOT NULL, b INT NOT NULL,
+c INT NOT NULL, d INT NOT NULL, KEY a (a, b, c)) ENGINE=ROCKSDB;
+create table t2 (pk INT PRIMARY KEY NOT NULL, a INT NOT NULL, b INT NOT NULL,
+c INT NOT NULL, KEY a (a, b, c)) ENGINE=ROCKSDB;
+create table t3 (pk INT PRIMARY KEY NOT NULL, a INT NOT NULL, b INT NOT NULL,
+c VARCHAR(15) CHARACTER SET latin1 NOT NULL, KEY a (a, b)) ENGINE=ROCKSDB;
+create table t4 (pk INT PRIMARY KEY, a INT) ENGINE=ROCKSDB;
+create table t5 (pk int primary key, a varchar(128) not null collate latin1_swedish_ci, b varchar(128) not null collate latin1_swedish_ci, index (a)) engine=rocksdb;
+
+SELECT variable_value INTO @bypass_executed_0 FROM
+performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_executed";
+SELECT variable_value INTO @bypass_failed_0 FROM
+performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_failed";
+SELECT variable_value INTO @bypass_rejected_0 FROM
+performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_rejected";
+
+--write_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_input.txt
+SELECT /*+ bypass */ d FROM test.t1 FORCE INDEX (a) WHERE a=1 AND b=2 AND d>4;
+SELECT /*+ bypass */ d FROM test.t1 FORCE INDEX (a) WHERE a=1 AND b>2 AND d>4;
+SELECT /*+ bypass */ pk FROM test.t1 WHERE pk>1 AND pk>=2;
+SELECT /*+ bypass */ pk FROM test.t1 WHERE pk>=1 AND pk>2;
+SELECT /*+ bypass */ pk FROM test.t1 WHERE pk<1 AND pk<=2;
+SELECT /*+ bypass */ pk FROM test.t1 WHERE pk<=1 AND pk<2;
+SELECT /*+ bypass */ a,b,c FROM test.t1 WHERE a>0 AND b>0;
+SELECT /*+ bypass */ a,b,c FROM test.t1 WHERE b IN (1,2) AND a>0;
+SELECT /*+ bypass */ a,b,c FROM test.t1 WHERE a>0 and b>0 and c>0;
+SELECT /*+ bypass */ a,b,c FROM test.t1 WHERE a=1 ORDER BY a ASC;
+SELECT /*+ bypass */ a,b,c FROM test.t1 FORCE INDEX (a) WHERE a=1 ORDER BY b ASC, a ASC;
+SELECT /*+ bypass */ a,b,c FROM test.t1 FORCE INDEX (a) WHERE a=1 ORDER BY a ASC, b ASC, c ASC, c ASC, c ASC, a ASC, b ASC, c ASC, d ASC;
+SELECT /*+ bypass */ a,b,c FROM test.t1 FORCE INDEX (a) WHERE a=1 ORDER BY c ASC, a ASC;
+SELECT /*+ bypass */ a,b,c FROM test.t1 FORCE INDEX (a) WHERE a=1 ORDER BY a ASC, a ASC;
+SELECT /*+ bypass */ a,b,c FROM test.t1 FORCE INDEX (a) WHERE a=1 ORDER BY a ASC, a ASC, a ASC, a ASC, a ASC, a ASC, a ASC, a ASC;
+SELECT /*+ bypass */ a,b,c FROM test.t1 FORCE INDEX (a) WHERE a=1 ORDER BY b ASC, b ASC;
+SELECT /*+ bypass */ a,b,c FROM test.t3 FORCE INDEX (a) WHERE a=1 ORDER BY b ASC, b ASC;
+SELECT /*+ bypass */ a,b,c FROM test.t1 FORCE INDEX (abc) WHERE a=1 ORDER BY b ASC, a ASC;
+# Too many WHERE expressions
+SELECT /*+ bypass */ a FROM test.t3 WHERE a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1 AND a=1;
+# NULL fields not supported
+SELECT /*+ bypass */ a FROM test.t4 WHERE a=1;
+# case insensitive condition is not supported
+SELECT /*+ bypass */ a,b FROM test.t5 FORCE INDEX (a) WHERE a="abc";
+EOF
+
+--replace_result $TEST_BYPASS_RPC_PLUGIN TEST_BYPASS_RPC_PLUGIN
+eval INSTALL PLUGIN test_bypass_rpc_plugin_info SONAME '$TEST_BYPASS_RPC_PLUGIN';
+UNINSTALL PLUGIN test_bypass_rpc_plugin_info;
+
+--diff_files $MYSQLD_DATADIR/test_bypass_rpc_plugin_sql.result $MYSQLD_DATADIR/test_bypass_rpc_plugin_rpc.result
+
+SELECT variable_value INTO @queries_executed_1 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_executed";
+SELECT variable_value INTO @queries_failed_1 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_failed";
+SELECT variable_value INTO @queries_rejected_1 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_rejected";
+
+SELECT @queries_executed_1 - @queries_executed_0;
+SELECT @queries_failed_1 - @queries_failed_0;
+SELECT @queries_rejected_1 - @queries_rejected_0;
+
+--remove_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_sql.result
+--remove_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_rpc.result
+--remove_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_input.txt
+
+# Testing rejected query history: log everything
+SELECT @@rocksdb_select_bypass_rejected_query_history_size into @save_rocksdb_select_bypass_rejected_query_history_size;
+SELECT @@rocksdb_bypass_rpc_rejected_log_ts_interval_secs into @save_rocksdb_bypass_rpc_rejected_log_ts_interval_secs;
+
+set global rocksdb_select_bypass_rejected_query_history_size=4;
+set global rocksdb_bypass_rpc_rejected_log_ts_interval_secs=0;
+SELECT @@rocksdb_bypass_rpc_log_rejected;
+SELECT @@rocksdb_select_bypass_rejected_query_history_size;
+SELECT @@rocksdb_bypass_rpc_rejected_log_ts_interval_secs;
+
+--write_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_input.txt
+SELECT /*+ bypass */ d FROM test.t1 FORCE INDEX (a) WHERE a=1 AND b=2 AND d>4;
+SELECT /*+ bypass */ d FROM test.t1 FORCE INDEX (a) WHERE a=1 AND b>2 AND d>4;
+EOF
+
+--replace_result $TEST_BYPASS_RPC_PLUGIN TEST_BYPASS_RPC_PLUGIN
+eval INSTALL PLUGIN test_bypass_rpc_plugin_info SONAME '$TEST_BYPASS_RPC_PLUGIN';
+UNINSTALL PLUGIN test_bypass_rpc_plugin_info;
+
+--diff_files $MYSQLD_DATADIR/test_bypass_rpc_plugin_sql.result $MYSQLD_DATADIR/test_bypass_rpc_plugin_rpc.result
+
+SELECT variable_value INTO @queries_executed_2 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_executed";
+SELECT variable_value INTO @queries_failed_2 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_failed";
+SELECT variable_value INTO @queries_rejected_2 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_rejected";
+
+SELECT @queries_executed_2 - @queries_executed_0;
+SELECT @queries_failed_2 - @queries_failed_0;
+SELECT @queries_rejected_2 - @queries_rejected_0;
+SELECT QUERY, ERROR_MSG, BYPASS_TYPE from information_schema.ROCKSDB_BYPASS_REJECTED_QUERY_HISTORY;
+
+--remove_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_sql.result
+--remove_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_rpc.result
+--remove_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_input.txt
+
+# Testing rejected query history: throttling logging to every 999 seconds
+set global rocksdb_bypass_rpc_rejected_log_ts_interval_secs=999;
+SELECT @@rocksdb_bypass_rpc_rejected_log_ts_interval_secs;
+
+--write_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_input.txt
+SELECT /*+ bypass */ d FROM test.t1 FORCE INDEX (a) WHERE a=1 AND b=2 AND d>4;
+SELECT /*+ bypass */ d FROM test.t1 FORCE INDEX (a) WHERE a=1 AND b>2 AND d>4;
+EOF
+
+--replace_result $TEST_BYPASS_RPC_PLUGIN TEST_BYPASS_RPC_PLUGIN
+eval INSTALL PLUGIN test_bypass_rpc_plugin_info SONAME '$TEST_BYPASS_RPC_PLUGIN';
+UNINSTALL PLUGIN test_bypass_rpc_plugin_info;
+
+--diff_files $MYSQLD_DATADIR/test_bypass_rpc_plugin_sql.result $MYSQLD_DATADIR/test_bypass_rpc_plugin_rpc.result
+
+SELECT variable_value INTO @queries_executed_3 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_executed";
+SELECT variable_value INTO @queries_failed_3 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_failed";
+SELECT variable_value INTO @queries_rejected_3 FROM performance_schema.global_status WHERE
+variable_name="rocksdb_bypass_rpc_rejected";
+
+SELECT @queries_executed_3 - @queries_executed_0;
+SELECT @queries_failed_3 - @queries_failed_0;
+SELECT @queries_rejected_3 - @queries_rejected_0;
+SELECT QUERY, ERROR_MSG, BYPASS_TYPE from information_schema.ROCKSDB_BYPASS_REJECTED_QUERY_HISTORY;
+
+--remove_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_sql.result
+--remove_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_rpc.result
+--remove_file $MYSQLD_DATADIR/test_bypass_rpc_plugin_input.txt
+
+set global rocksdb_bypass_rpc_on=@save_rocksdb_bypass_rpc_on;
+
+set global rocksdb_bypass_rpc_log_rejected=@save_rocksdb_bypass_rpc_log_rejected;
+set global rocksdb_select_bypass_rejected_query_history_size=@save_rocksdb_select_bypass_rejected_query_history_size;
+set global rocksdb_bypass_rpc_rejected_log_ts_interval_secs=@save_rocksdb_bypass_rpc_rejected_log_ts_interval_secs;
+
+set global rocksdb_select_bypass_allow_filters=@save_rocksdb_select_bypass_allow_filters;
+set global rocksdb_select_bypass_policy=@save_rocksdb_select_bypass_policy;
+
+drop table t1;
+drop table t2;
+drop table t3;
+drop table t4;
+drop table t5;

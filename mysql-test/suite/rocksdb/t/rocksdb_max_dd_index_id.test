@@ -1,0 +1,27 @@
+--source include/have_rocksdb.inc
+
+# Initialization
+# Create a user table
+create table i1 (a int primary key, b int) engine=rocksdb;
+
+# Restart mysqld
+# Read MAX_INDEX_ID and MAX_DD_INDEX_ID as initial value
+--source include/restart_mysqld.inc
+let $start_max_index_id = query_get_value(SELECT * from INFORMATION_SCHEMA.ROCKSDB_GLOBAL_INFO where type = 'MAX_INDEX_ID', VALUE, 1);
+let $start_max_dd_index_id = query_get_value(SELECT * from INFORMATION_SCHEMA.ROCKSDB_GLOBAL_INFO where type = 'MAX_DD_INDEX_ID', VALUE, 1);
+
+# Create a user table
+# the MAX_INDEX_ID should bump by 1
+# the MAX_DD_INDEX_ID should not change
+create table u1 (a int primary key, b int) engine=rocksdb;
+
+let $max_index_id_0 = query_get_value(SELECT * from INFORMATION_SCHEMA.ROCKSDB_GLOBAL_INFO where type = 'MAX_INDEX_ID', VALUE, 1);
+let $max_dd_index_id_0 = query_get_value(SELECT * from INFORMATION_SCHEMA.ROCKSDB_GLOBAL_INFO where type = 'MAX_DD_INDEX_ID', VALUE, 1);
+# expect 1 and 0
+expr $diff = $max_index_id_0 - $start_max_index_id;
+echo $diff;
+expr $diff = $max_dd_index_id_0 - $start_max_dd_index_id;
+echo $diff;
+
+drop table i1;
+drop table u1;

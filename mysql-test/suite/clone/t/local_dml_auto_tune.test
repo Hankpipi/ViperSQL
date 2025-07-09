@@ -1,0 +1,6 @@
+# Test clone with concurrent DML
+--source include/not_windows.inc
+--source include/no_valgrind_without_big.inc
+
+--let clone_auto_tune = 1
+--source local_dml.test

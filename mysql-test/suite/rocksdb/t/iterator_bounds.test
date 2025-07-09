@@ -1,0 +1,126 @@
+#
+# Issue #878: Descending scans from reverse column families return no results
+# due to iterator bounds
+#
+
+create table t (i int primary key) engine=rocksdb;
+
+let $cond=1;
+while ($cond)
+{
+  --disable_query_log
+  truncate table t;
+  --enable_query_log
+  let $cond=`select RIGHT(HEX(index_number), 2) != "FD" from information_schema.rocksdb_ddl where table_name = 't'`;
+}
+
+# Index id is now at FD. Create a table with primary and secondary key, so
+# that the secondary key index id ends in 0xFF.
+
+drop table t;
+create table t (i int primary key, j int, key(j) comment 'rev:bf5_2') engine=rocksdb;
+select RIGHT(HEX(index_number), 2) from information_schema.rocksdb_ddl where table_name = 't';
+
+insert into t values (1, 1);
+
+select j from t order by j asc;
+select j from t order by j desc;
+
+drop table t;
+
+#
+# check bounds for writebatch(forward cf), all data changes are in writebatch
+#
+create table t(
+  a int unsigned not null,
+  b int unsigned not null,
+  c varchar(64) not null COLLATE utf8_bin,
+  primary key(a),
+  key(b,c)
+) DEFAULT CHARSET=utf8 COLLATE=utf8_bin;
+
+begin;
+insert into t values(101, 101, 'view_routine_usage');
+# SD(101, 'view_routine_usage',101)
+update t set b = 100 where b = 101 and c like 'view_routine_usage';
+# dring iterating, writebatchwithindex may return "out of range" record after 
+# checking with upper bounds. sometimes the "out of range" record is a SD record.
+# For SD record, its value slice will be empty. Try to decode a key slice
+# which contains varchar with empty value slice, decoder will crash due missing
+# upack_info in value slice
+update t set b = 101 where b = 100 and c like 'view_routine_usage';
+select a from t where b = 101 and c like 'view_routine_usage';
+rollback;
+
+drop table t;
+
+
+#
+# check bounds for writebatch(rev cf), all data changes are in writebatch
+#
+create table t(
+  a int unsigned not null,
+  b int unsigned not null,
+  c varchar(64) not null COLLATE utf8_bin,
+  primary key(a),
+  key(b,c) comment 'rev:bc'
+) DEFAULT CHARSET=utf8 COLLATE=utf8_bin;
+
+begin;
+insert into t values(110, 110, 'view_routine_usage');
+insert into t values(100, 100, 'view_routine_usage');
+# SD(100, 'view_routine_usage',100)
+update t set b = 101 where b = 100 and c like 'view_routine_usage';
+# during iterating, we don't check with lower bound in writebatchwithindex
+# in rev cf,
+update t set b = 100 where b = 101 and c like 'view_routine_usage';
+select a from t where b = 101 and c like 'view_routine_usage';
+rollback;
+
+drop table t;
+
+#
+# check query return correct result while query will switch between using bloomfilter 
+# and using iterate bounds during execution
+#
+# force range query
+set optimizer_force_index_for_range = on;
+# use latin1_swedish_ci to not use bloomfilter
+# for query with "", its eq_cond size = 5, while prefix_extractor=capped:12
+# since 5 < 12, so bloomfilter isn't used. 
+# 5 === 4 for index size + 1 for "" encoding size
+# don't use DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci, 
+# since for "", its encoding size is 10
+create table t3(
+  a int, 
+  b varchar(36) CHARACTER SET latin1 COLLATE latin1_swedish_ci DEFAULT NULL, 
+  c int, 
+  primary key(a), key b(b, c)
+);
+insert into t3 values(1, "11",1),(2,"22",2),(3,"33",3);
+--replace_column 8 # 10 # 11 #
+explain select count(*) from t3 force index(b) where b in ("", "33");
+select count(*) from t3 force index(b) where b in ("", "33");
+--replace_column 8 # 10 # 11 #
+explain select count(*) from t3 force index(b) where b in ("", "33", "","33");
+select count(*) from t3 force index(b) where b in ("", "33", "","33");
+drop table t3;
+
+# force range query
+set optimizer_force_index_for_range = on;
+create table t2(
+  a int, 
+  b int, 
+  c bigint, 
+  d bigint, 
+  primary key(a), key b(b,c,d)
+);
+insert into t2 values(1,1,1,1),(2,2,2,2),(3,3,3,3);
+--replace_column 8 # 10 # 11 #
+explain select count(*) from t2 force index(b) where b = 2 or (b = 3 and c=3);
+select count(*) from t2 force index(b) where b = 2 or (b = 3 and c=3);
+--replace_column 8 # 10 # 11 #
+explain select count(*) from t2 force index(b) where (b = 3 and c=3) or b = 2;
+select count(*) from t2 force index(b) where (b = 3 and c=3) or b = 2;
+
+drop table t2;

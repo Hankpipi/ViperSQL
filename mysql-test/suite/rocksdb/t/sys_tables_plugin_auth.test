@@ -1,0 +1,4 @@
+--source include/not_valgrind.inc
+--source include/have_plugin_auth.inc
+
+--source include/plugin_auth.inc

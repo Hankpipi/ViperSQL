@@ -1,0 +1,177 @@
+DROP TABLE IF EXISTS t1,t2;
+CREATE TABLE t1 (a INT PRIMARY KEY, b CHAR(8)) ENGINE=rocksdb charset=latin1 CHECKSUM=0;
+INSERT INTO t1 (a,b) VALUES (1,'a'),(2,'b');
+CREATE TABLE t2 (a INT PRIMARY KEY, b CHAR(8)) ENGINE=rocksdb charset=latin1 CHECKSUM=0;
+CHECKSUM TABLE t1;
+Table	Checksum
+test.t1	4259194219
+CHECKSUM TABLE t2, t1;
+Table	Checksum
+test.t2	0
+test.t1	4259194219
+CHECKSUM TABLE t1, t2 QUICK;
+Table	Checksum
+test.t1	NULL
+test.t2	NULL
+CHECKSUM TABLE t1, t2 EXTENDED;
+Table	Checksum
+test.t1	4259194219
+test.t2	0
+DROP TABLE t1, t2;
+#
+# Issue #110: SQL command checksum returns inconsistent result
+#
+create table t1 (pk int primary key, col1 varchar(10)) engine=rocksdb charset=latin1;
+insert into t1 values (2,'fooo');
+insert into t1 values (1,NULL);
+checksum table t1;
+Table	Checksum
+test.t1	1303411884
+checksum table t1;
+Table	Checksum
+test.t1	1303411884
+select * from t1 where pk=2;
+pk	col1
+2	fooo
+checksum table t1;
+Table	Checksum
+test.t1	1303411884
+checksum table t1;
+Table	Checksum
+test.t1	1303411884
+flush tables;
+checksum table t1;
+Table	Checksum
+test.t1	1303411884
+checksum table t1;
+Table	Checksum
+test.t1	1303411884
+drop table t1;
+#
+#  The following test is about making sure MyRocks CHECKSUM TABLE
+#  values are the same as with InnoDB.
+#  If you see checksum values changed, make sure their counterparts
+#  in suite/innodb/r/checksum-matches-myrocks.result match.
+#
+create table t1 (pk int primary key, col1 varchar(10)) engine=rocksdb charset=latin1;
+insert into t1 values (2,'fooo');
+insert into t1 values (1,NULL);
+checksum table t1;
+Table	Checksum
+test.t1	1303411884
+drop table t1;
+create table t1 (
+pk bigint unsigned primary key,
+col1 varchar(10),
+col2 tinyint,
+col3 double
+) engine=rocksdb charset=latin1;
+checksum table t1;
+Table	Checksum
+test.t1	0
+insert into t1 values (1, NULL,  NULL, NULL);
+insert into t1 values (2, 'foo', NULL, NULL);
+checksum table t1;
+Table	Checksum
+test.t1	3633741545
+checksum table t1 (pk);
+Table	Checksum
+test.t1	3499145227
+insert into t1 values (3, NULL,  123,  NULL);
+insert into t1 values (4, NULL,  NULL, 2.78);
+checksum table t1;
+Table	Checksum
+test.t1	390004011
+insert into t1 values (5, 'xxxYYYzzzT',  NULL, 2.78);
+insert into t1 values (6, '',            NULL, 2.78);
+checksum table t1;
+Table	Checksum
+test.t1	3183101003
+Column order should be respected: these should yield different results.
+checksum table t1 (pk, col1);
+Table	Checksum
+test.t1	2346353413
+checksum table t1 (col1, pk);
+Table	Checksum
+test.t1	1075735415
+checksum table t1 (pk, col1, col2);
+Table	Checksum
+test.t1	3268587521
+Column order should be respected: these should yield different results.
+checksum table t1 (pk, col1, col2, col3);
+Table	Checksum
+test.t1	1678552936
+checksum table t1 (pk, col1, col3, col2);
+Table	Checksum
+test.t1	305394284
+Add a nullable column to t1 at the end to ensure the selective checksum
+does not change. Note: the default values for col4 will be NULL.
+alter table t1 add column col4 int;
+select pk, col4 from t1;
+pk	col4
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+Add a nullable column to t1 in the middle to ensure the selective
+checksum does not change. Note: the default values for col5 will be NULL.
+alter table t1 add column col5 int after col2;
+select pk, col5 from t1;
+pk	col5
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+Change a nullable column to a non-NULL value to verify that the checksum
+stays the same when that column is not selected.
+update t1 set col4 = 1 where pk = 1;
+select pk, col4 from t1;
+pk	col4
+1	1
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+Add lots of nullable columns to t1 at the end to ensure that even if the
+number of null bytes changes, the selective checksum still
+does not change.
+alter table t1
+add column col6 int, add column col7 int,
+add column col8 int, add column col9 int,
+add column col10 int;
+create table t2 (a int, b int, c int) engine=rocksdb;
+insert into t2 values (1, 0, 0);
+checksum table t2 (a, b, c);
+Table	Checksum
+test.t2	1998456634
+begin;
+update t2 set b=NULL;
+rollback;
+begin;
+update t2 set c=NULL;
+rollback;
+Checksums should differ.
+drop table t2;
+Negative tests
+--------------
+checksum table t1 ();
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near ')' at line 1
+Can't use * expression in select list.
+checksum table t1 (*);
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '*)' at line 1
+Can't checksum multiple tables with select-list.
+checksum table t1 (col1), t2;
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near ', t2' at line 1
+checksum table t1, t2 (fake_col);
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '(fake_col)' at line 1
+Can't use expressions in select list.
+checksum table t1 (pk + 1, col1);
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '+ 1, col1)' at line 1
+checksum table t1 (pk, z);
+ERROR 42S22: Unknown column 'z' in 'field list'
+drop table t1;

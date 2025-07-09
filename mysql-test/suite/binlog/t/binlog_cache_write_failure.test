@@ -1,0 +1,106 @@
+# === Purpose ===
+#
+# Verify that disk full/out of space errors generated during the flush
+# stage of binlog commit are properly handled by the server.
+#
+# === Implementation ===
+#
+# Simulate tempoary file write failures in below  scenarios and verify the
+# failures can be handled correctly.
+# - Simulate binlog cache write failure in an INSERT which write data more than
+#   cache size.
+# - Simulate my_b_flush_io_cache failure in an ROLLBACK TO.
+# - Simulate my_b_flush_io_cache failure when reseting binlog cache in a
+#   ROLLBACK.
+# - Simulate my_b_flush_io_cache failure when reseting binlog cache in a
+#   COMMIT
+# - Simulate write failure
+# - Simulate my_b_flush_io_cache failure when reseting binlog cache in
+#   disconnect
+# - Simulate a binlog cache write failure when reinitializing it for
+#   copying to binlog. It should cause server abort if binlog_error_action
+#   is ABORT_SERVER
+#
+# === References ===
+#
+# Bug #27399620 BINLOG AND ENGINE BECOME INCONSISTENT WHEN BINLOG CACHE FILE
+# GETS OUT OF SPACE
+
+--source include/have_binlog_format_row.inc
+--source include/have_log_bin.inc
+--source include/have_debug.inc
+# Don't test this under valgrind, memory leaks will occur
+--source include/not_valgrind.inc
+# Avoid CrashReporter popup on Mac
+--source include/not_crashrep.inc
+--source include/count_sessions.inc
+
+call mtr.add_suppression("An error occurred during flush stage of the commit");
+call mtr.add_suppression("Attempting backtrace. You can use the following information to find out*");
+call mtr.add_suppression(".*Error writing file.*");
+RESET MASTER;
+CREATE TABLE t1(c1 varchar(8192));
+CREATE TABLE t2(c1 varchar(8192));
+CREATE TABLE t3(c1 varchar(8192));
+
+SET @saved_binlog_cache_size = @@global.binlog_cache_size;
+SET GLOBAL binlog_cache_size = 4096;
+connect(con1,localhost,root,,);
+
+--echo
+--echo # Case 1 Simulate my_b_flush_io_cache failure when truncating binlog
+--echo #        cache. ROLLBACK TO triggers binlog cache truncation process.
+--source include/save_binlog_position.inc
+
+BEGIN;
+INSERT INTO t1 VALUES (repeat('a', 2048));
+
+# Below statemens in sp1 should not be binlogged
+SAVEPOINT sp1;
+INSERT INTO t2 VALUES (repeat('a', 4096));
+INSERT INTO t3 VALUES (repeat('b', 4096));
+
+# ROLLBACK to savepoint should not call my_b_flush_io_cache which
+# caused extra events were logged before the fix.
+SET SESSION debug = "+d,simulate_error_during_flush_cache_to_file";
+ROLLBACK TO sp1;
+SET SESSION debug = "-d,simulate_error_during_flush_cache_to_file";
+
+INSERT INTO t1 VALUES (repeat('c', 8192));
+COMMIT;
+
+# The transaction should be binlogged correctly
+--let $binlog_start= $binlog_position
+--source include/show_binlog_events.inc
+
+--echo
+--echo # Case 2 Simulate my_b_flush_io_cache failure when reseting binlog cache
+--echo #        in ROLLBACK statement
+BEGIN;
+INSERT INTO t1 VALUES (repeat('a', 8192));
+
+# When reseting binlog cache, it should not call my_b_flush_io_cache to flush
+# data in binlog cache to temporary file. It caused assertion failure:
+# binlog_cache_data::reset(): Assertion `is_binlog_empty()' before the fix.
+SET SESSION debug = "+d,simulate_error_during_flush_cache_to_file";
+ROLLBACK;
+SET SESSION debug = "-d,simulate_error_during_flush_cache_to_file";
+
+--echo
+--echo # Case 3 CLIENT DISCONNECT. it is same to ROLLBACK
+BEGIN;
+INSERT INTO t1 VALUES (repeat('a', 8192));
+
+SET SESSION debug = "+d,simulate_error_during_flush_cache_to_file";
+--disconnect con1
+
+
+# Cleanup
+--connection default
+--enable_reconnect
+DROP TABLE t1, t2, t3;
+RESET MASTER;
+
+SET @@global.binlog_cache_size = @saved_binlog_cache_size;
+
+--source include/wait_until_count_sessions.inc

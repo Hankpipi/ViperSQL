@@ -1,0 +1,47 @@
+--source include/have_rocksdb.inc
+
+# increase counter because of "bulk_load*" tests that may be run in background
+--let $explicit_default_counter= 10000
+# Make sure we have a fresh server with all status variables initialized to 0
+--source include/restart_mysqld.inc
+
+SELECT @@rocksdb_select_bypass_policy;
+SELECT @@rocksdb_select_bypass_policy into @save_rocksdb_select_bypass_policy;
+set global rocksdb_select_bypass_policy=2;
+SELECT @@rocksdb_select_bypass_policy;
+
+SELECT @@rocksdb_select_bypass_allow_filters;
+SELECT @@rocksdb_select_bypass_allow_filters into
+@save_rocksdb_select_bypass_allow_filters;
+set global rocksdb_select_bypass_allow_filters=0;
+
+SELECT @@rocksdb_select_bypass_rejected_query_history_size; 
+
+SELECT @@rocksdb_select_bypass_fail_unsupported;
+SELECT @@rocksdb_select_bypass_fail_unsupported into @save_fail_unsupported;
+
+--echo Test bypass failing with unsupported scenario
+set global rocksdb_select_bypass_fail_unsupported=true;
+--let bypass_fallback=0
+SELECT @@rocksdb_select_bypass_fail_unsupported;
+--source ./bypass_select_unsupported.inc
+
+--echo Test bypass fallback with unsupported scenario
+set global rocksdb_select_bypass_fail_unsupported=false;
+--let bypass_fallback=1
+SELECT @@rocksdb_select_bypass_fail_unsupported;
+--source ./bypass_select_unsupported.inc
+
+SELECT @@rocksdb_select_bypass_fail_unsupported;
+set global rocksdb_select_bypass_fail_unsupported=@save_fail_unsupported;
+SELECT @@rocksdb_select_bypass_fail_unsupported;
+
+set global rocksdb_select_bypass_rejected_query_history_size=0;
+SELECT @@rocksdb_select_bypass_rejected_query_history_size;
+
+set global rocksdb_select_bypass_allow_filters=@save_rocksdb_select_bypass_allow_filters;
+
+# Restore rocksdb_select_bypass_policy
+SELECT @@rocksdb_select_bypass_policy;
+set global rocksdb_select_bypass_policy=@save_rocksdb_select_bypass_policy;
+SELECT @@rocksdb_select_bypass_policy;

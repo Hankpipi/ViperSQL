@@ -1,0 +1,1067 @@
+#
+# json_valid
+#
+# returns NULL
+select json_valid(null);
+json_valid(null)
+NULL
+# valid json strings
+select json_valid('{}');
+json_valid('{}')
+1
+select json_valid('{"k":"v"}');
+json_valid('{"k":"v"}')
+1
+select json_valid('{"k":{}}');
+json_valid('{"k":{}}')
+1
+select json_valid('{"k":[]}');
+json_valid('{"k":[]}')
+1
+select json_valid('{"k1":"v1","k2":true,"k3":3}');
+json_valid('{"k1":"v1","k2":true,"k3":3}')
+1
+select json_valid('{"k1":{"k2":"v2"}}');
+json_valid('{"k1":{"k2":"v2"}}')
+1
+select json_valid('{"key":[1,2,3]}');
+json_valid('{"key":[1,2,3]}')
+1
+select json_valid('[]');
+json_valid('[]')
+1
+select json_valid('[[[[[]]]]]');
+json_valid('[[[[[]]]]]')
+1
+select json_valid('[{}]');
+json_valid('[{}]')
+1
+select json_valid('[1,2,3]');
+json_valid('[1,2,3]')
+1
+select json_valid('[1,false,"str",1.2]');
+json_valid('[1,false,"str",1.2]')
+1
+select json_valid('[{"k1":"v1"},2,3]');
+json_valid('[{"k1":"v1"},2,3]')
+1
+select json_valid('[[1,2,3],2,3]');
+json_valid('[[1,2,3],2,3]')
+1
+select json_valid(concat('{"k1":[', repeat('{},', 200), '{}]}'));
+json_valid(concat('{"k1":[', repeat('{},', 200), '{}]}'))
+1
+select json_valid(concat('{"k2":[', repeat('[],', 200), '[]]}'));
+json_valid(concat('{"k2":[', repeat('[],', 200), '[]]}'))
+1
+select json_valid(concat('{"k3":[', repeat('{},', 100), repeat('[],', 100), '[]]}'));
+json_valid(concat('{"k3":[', repeat('{},', 100), repeat('[],', 100), '[]]}'))
+1
+select json_valid(concat('[', repeat('[],', 200), '[]]'));
+json_valid(concat('[', repeat('[],', 200), '[]]'))
+1
+# utf-8 multi-byte character
+select json_valid('{"MySQL":"开源数据库"}');
+json_valid('{"MySQL":"开源数据库"}')
+1
+select json_valid('{"开源数据库":"MySQL"}');
+json_valid('{"开源数据库":"MySQL"}')
+1
+# invalid json strings
+select json_valid('');
+json_valid('')
+0
+select json_valid(123);
+json_valid(123)
+0
+select json_valid(1.23);
+json_valid(1.23)
+0
+select json_valid('abc');
+json_valid('abc')
+0
+select json_valid('{"key"}');
+json_valid('{"key"}')
+0
+select json_valid('{1:value}');
+json_valid('{1:value}')
+0
+select json_valid('{"key":"value"');
+json_valid('{"key":"value"')
+0
+select json_valid('[1,2,3');
+json_valid('[1,2,3')
+0
+select json_valid('{}}');
+json_valid('{}}')
+0
+select json_valid('[[]');
+json_valid('[[]')
+0
+select json_valid('{[]}');
+json_valid('{[]}')
+0
+select json_valid(repeat('{"a":',100));
+json_valid(repeat('{"a":',100))
+0
+select json_valid(repeat('{"a":',101));
+ERROR 22032: The JSON document exceeds the maximum depth.
+select json_valid(repeat('{"a":',10000));
+ERROR 22032: The JSON document exceeds the maximum depth.
+select json_valid(repeat('["a",',100));
+json_valid(repeat('["a",',100))
+0
+select json_valid(repeat('["a",',101));
+ERROR 22032: The JSON document exceeds the maximum depth.
+select json_valid(repeat('["a",',10000));
+ERROR 22032: The JSON document exceeds the maximum depth.
+#
+# json_array_length
+#
+# null result
+select json_array_length(null);
+json_array_length(null)
+NULL
+# valid arrays
+select json_array_length('[]');
+json_array_length('[]')
+0
+select json_array_length('[1]');
+json_array_length('[1]')
+1
+select json_array_length('["str"]');
+json_array_length('["str"]')
+1
+select json_array_length('[null]');
+json_array_length('[null]')
+1
+select json_array_length('[true,false]');
+json_array_length('[true,false]')
+2
+select json_array_length('[1.234]');
+json_array_length('[1.234]')
+1
+select json_array_length('[1,"str",null,true,false,1.2345]');
+json_array_length('[1,"str",null,true,false,1.2345]')
+6
+select json_array_length('[[[[[[]]]]]]');
+json_array_length('[[[[[[]]]]]]')
+1
+select json_array_length('[[],[],[],[],[]]');
+json_array_length('[[],[],[],[],[]]')
+5
+select json_array_length('[[1,2,3],{"k1":"v1"},{"k2":2},[4,5,6]]');
+json_array_length('[[1,2,3],{"k1":"v1"},{"k2":2},[4,5,6]]')
+4
+json_array_length_calls = 3
+# utf-8 multi-byte character
+select json_array_length('[{"MySQL":"开源数据库"},"MySQL"]');
+json_array_length('[{"MySQL":"开源数据库"},"MySQL"]')
+2
+select json_array_length('[{"开源数据库":"MySQL"},"开源数据库"]');
+json_array_length('[{"开源数据库":"MySQL"},"开源数据库"]')
+2
+# not json array
+select json_array_length('{}');
+ERROR HY000: Invalid JSON array: '{}', pos 0, error 'Invalid array value'.
+select json_array_length('{"key":"value"}');
+ERROR HY000: Invalid JSON array: '{"key": "value"}', pos 0, error 'Invalid array value'.
+select json_array_length('{"key":[]}');
+ERROR HY000: Invalid JSON array: '{"key": []}', pos 0, error 'Invalid array value'.
+# invalid json object (expecting error)
+select json_array_length('');
+ERROR 22032: Invalid JSON text in argument 1 to function json_array_length: "The document is empty." at position 0.
+#
+# nested function call
+#
+select json_array_length(json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}', '$.k1'));
+json_array_length(json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}', '$.k1'))
+4
+#
+# json_contains_key
+#
+# null results
+select json_contains_key(null,null);
+json_contains_key(null,null)
+NULL
+select json_contains_key(null,'key');
+json_contains_key(null,'key')
+NULL
+# invalid key paths
+select json_contains_key('{}',null);
+json_contains_key('{}',null)
+0
+select json_contains_key('{"k1":"v1"}','k1',null);
+json_contains_key('{"k1":"v1"}','k1',null)
+0
+select json_contains_key('{"k1":"v1"}','k1','k2');
+json_contains_key('{"k1":"v1"}','k1','k2')
+0
+select json_contains_key('{"k1":"v1"}','k2');
+json_contains_key('{"k1":"v1"}','k2')
+0
+select json_contains_key('[]',1);
+json_contains_key('[]',1)
+0
+select json_contains_key('[1]',1);
+json_contains_key('[1]',1)
+0
+select json_contains_key('[1]',-2);
+json_contains_key('[1]',-2)
+0
+# duplicate keys will be matched at the first occurrence
+select json_contains_key('{"k1":"v1","k1":{"k2":"v2"}}','k1','k2');
+json_contains_key('{"k1":"v1","k1":{"k2":"v2"}}','k1','k2')
+0
+# valid key paths
+select json_contains_key('{"k1":"v1"}','k1');
+json_contains_key('{"k1":"v1"}','k1')
+1
+select json_contains_key('[1,2,3,4]',0);
+json_contains_key('[1,2,3,4]',0)
+1
+select json_contains_key('[1,2,3,4]',1);
+json_contains_key('[1,2,3,4]',1)
+1
+select json_contains_key('[1,2,3,4]',2);
+json_contains_key('[1,2,3,4]',2)
+1
+select json_contains_key('[1,2,3,4]',3);
+json_contains_key('[1,2,3,4]',3)
+1
+select json_contains_key('[1,2,3,4]','0');
+json_contains_key('[1,2,3,4]','0')
+1
+select json_contains_key('[1,2,3,4]','1');
+json_contains_key('[1,2,3,4]','1')
+1
+select json_contains_key('[1,2,3,4]','2');
+json_contains_key('[1,2,3,4]','2')
+1
+select json_contains_key('[1,2,3,4]','3');
+json_contains_key('[1,2,3,4]','3')
+1
+select json_contains_key('{"k1":{"k2":{"k3":12.345}}}','k1');
+json_contains_key('{"k1":{"k2":{"k3":12.345}}}','k1')
+1
+select json_contains_key('{"k1":{"k2":{"k3":12.345}}}','k1','k2');
+json_contains_key('{"k1":{"k2":{"k3":12.345}}}','k1','k2')
+1
+select json_contains_key('{"k1":{"k2":{"k3":12.345}}}','k1','k2','k3');
+json_contains_key('{"k1":{"k2":{"k3":12.345}}}','k1','k2','k3')
+1
+# test case sensitivity
+select json_contains_key('{"k1":{"k2":{"k3":12.345}}}','K1');
+json_contains_key('{"k1":{"k2":{"k3":12.345}}}','K1')
+0
+# duplicate keys will be matched at the first occurrence
+select json_contains_key('{"k1":"v1","k1":{"k2":"v2"}}','k1');
+json_contains_key('{"k1":"v1","k1":{"k2":"v2"}}','k1')
+1
+# utf-8 multi-byte character
+select json_contains_key('{"MySQL":"开源数据库"}','MySQL');
+json_contains_key('{"MySQL":"开源数据库"}','MySQL')
+1
+select json_contains_key('{"开源数据库":"MySQL"}','开源数据库');
+json_contains_key('{"开源数据库":"MySQL"}','开源数据库')
+1
+select json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1');
+json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1')
+1
+select json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',0);
+json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',0)
+1
+select json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1);
+json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1)
+1
+select json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',2);
+json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',2)
+1
+select json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',3);
+json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',3)
+1
+select json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2');
+json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2')
+1
+select json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',0);
+json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',0)
+1
+select json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',1);
+json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',1)
+1
+select json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',2);
+json_contains_key('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',2)
+1
+select json_contains_key('{"$":"v1"}','$');
+json_contains_key('{"$":"v1"}','$')
+1
+select json_contains_key('{"$.k1":"v1"}','$.k1');
+json_contains_key('{"$.k1":"v1"}','$.k1')
+1
+select json_contains_key('{"k1":"v1"}','$.k1');
+json_contains_key('{"k1":"v1"}','$.k1')
+0
+select json_contains_key('{"$**.k1":"v1"}','$**.k1');
+json_contains_key('{"$**.k1":"v1"}','$**.k1')
+1
+select json_contains_key('{"k1":"v1"}','$**.k1');
+json_contains_key('{"k1":"v1"}','$**.k1')
+0
+select json_contains_key('{"*":"v1"}','*');
+json_contains_key('{"*":"v1"}','*')
+1
+select json_contains_key('{"**":"v1"}','*');
+json_contains_key('{"**":"v1"}','*')
+0
+select json_contains_key('{"**":"v1"}','**');
+json_contains_key('{"**":"v1"}','**')
+1
+select json_contains_key('{"a": {"$":"v1"}}','a','$');
+json_contains_key('{"a": {"$":"v1"}}','a','$')
+1
+select json_contains_key('{"a": {"*":"v1"}}','a','*');
+json_contains_key('{"a": {"*":"v1"}}','a','*')
+1
+select json_contains_key('{"a": {"**":"v1"}}','a','*');
+json_contains_key('{"a": {"**":"v1"}}','a','*')
+0
+select json_contains_key('{"a": {"**":"v1"}}','a','**');
+json_contains_key('{"a": {"**":"v1"}}','a','**')
+1
+select json_contains_key('{"\\"a":"v1"}','a');
+json_contains_key('{"\\"a":"v1"}','a')
+0
+select json_contains_key('{"\\"a":"v1"}','"a');
+json_contains_key('{"\\"a":"v1"}','"a')
+1
+select json_contains_key('{"\\"a":"v1"}','\"a');
+json_contains_key('{"\\"a":"v1"}','\"a')
+1
+select json_contains_key('{"\\"a":"v1"}','\\"a');
+json_contains_key('{"\\"a":"v1"}','\\"a')
+0
+select json_contains_key('{"k.1" : "v"}', "k.1");
+json_contains_key('{"k.1" : "v"}', "k.1")
+1
+select json_contains_key('{"0":["k1",{"2":{"3":{"4":{"5":{"6":{"7":{"8":{"9":{"10":"11"}}}}}}}}}]}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+json_contains_key('{"0":["k1",{"2":{"3":{"4":{"5":{"6":{"7":{"8":{"9":{"10":"11"}}}}}}}}}]}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+1
+select json_contains_key('{"0":"1"}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+json_contains_key('{"0":"1"}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+0
+json_contains_key_calls = 2
+# invalid json object (expecting error)
+select json_contains_key('', 'k1');
+ERROR 22032: Invalid JSON text in argument 1 to function json_contains_key: "The document is empty." at position 0.
+#
+# json_extract
+#
+# null results (invalid json or key path)
+select json_extract(null,null);
+json_extract(null,null)
+NULL
+select json_extract(null,'key');
+json_extract(null,'key')
+NULL
+select json_extract('{}',null);
+json_extract('{}',null)
+NULL
+select json_extract('{"k1":"v1"}','k1',null);
+json_extract('{"k1":"v1"}','k1',null)
+NULL
+select json_extract('{"k1":"v1"}','k1','k2');
+json_extract('{"k1":"v1"}','k1','k2')
+NULL
+select json_extract('{"k1":"v1"}','k2');
+json_extract('{"k1":"v1"}','k2')
+NULL
+select json_extract('[]',1);
+json_extract('[]',1)
+NULL
+select json_extract('[1]',1);
+json_extract('[1]',1)
+NULL
+select json_extract('[1]',-1);
+json_extract('[1]',-1)
+NULL
+select json_extract('[1]','k1');
+json_extract('[1]','k1')
+NULL
+# duplicate keys will be matched at the first occurrence
+select json_extract('{"k1":"v1","k1":{"k2":"v2"}}','k1','k2');
+json_extract('{"k1":"v1","k1":{"k2":"v2"}}','k1','k2')
+NULL
+# valid key paths
+select json_extract('{"k1":"v1"}','k1');
+json_extract('{"k1":"v1"}','k1')
+"v1"
+select json_extract('{"k1":true}','k1');
+json_extract('{"k1":true}','k1')
+true
+select json_extract('{"k1":false}','k1');
+json_extract('{"k1":false}','k1')
+false
+select json_extract('{"k1":null}','k1');
+json_extract('{"k1":null}','k1')
+null
+select json_extract('{"k1":12}','k1');
+json_extract('{"k1":12}','k1')
+12
+select json_extract('{"k1":1.23}','k1');
+json_extract('{"k1":1.23}','k1')
+1.23
+select json_extract('[1,2,3,4]',0);
+json_extract('[1,2,3,4]',0)
+1
+select json_extract('[1,2,3,4]',1);
+json_extract('[1,2,3,4]',1)
+2
+select json_extract('[1,2,3,4]',2);
+json_extract('[1,2,3,4]',2)
+3
+select json_extract('[1,2,3,4]',3);
+json_extract('[1,2,3,4]',3)
+4
+select json_extract('[1,2,3,4]','0');
+json_extract('[1,2,3,4]','0')
+1
+select json_extract('[1,2,3,4]','1');
+json_extract('[1,2,3,4]','1')
+2
+select json_extract('[1,2,3,4]','2');
+json_extract('[1,2,3,4]','2')
+3
+select json_extract('[1,2,3,4]','3');
+json_extract('[1,2,3,4]','3')
+4
+select json_extract('{"k1":{"k2":{"k3":12.345}}}','k1');
+json_extract('{"k1":{"k2":{"k3":12.345}}}','k1')
+{"k2":{"k3":12.345}}
+select json_extract('{"k1":{"k2":{"k3":12.345}}}','k1','k2');
+json_extract('{"k1":{"k2":{"k3":12.345}}}','k1','k2')
+{"k3":12.345}
+select json_extract('{"k1":{"k2":{"k3":12.345}}}','k1','k2','k3');
+json_extract('{"k1":{"k2":{"k3":12.345}}}','k1','k2','k3')
+12.345
+select json_extract('{"1234":"foo", "123456789123456789":"bar"}', '1234');
+json_extract('{"1234":"foo", "123456789123456789":"bar"}', '1234')
+"foo"
+select json_extract('{"1234":"foo", "123456789123456789":"bar"}', '12345');
+json_extract('{"1234":"foo", "123456789123456789":"bar"}', '12345')
+NULL
+select json_extract('{"1234":"foo", "123456789123456789":"bar"}', '123456789123456789');
+json_extract('{"1234":"foo", "123456789123456789":"bar"}', '123456789123456789')
+"bar"
+select json_extract('{"1234":"foo", "123456789123456789":"bar"}', '123456789123456789123456789');
+json_extract('{"1234":"foo", "123456789123456789":"bar"}', '123456789123456789123456789')
+NULL
+select json_extract('{"123456789123456789123456789123456789":"foo", "123456789123456789":"bar"}', '123456789123456789123456789123456789');
+json_extract('{"123456789123456789123456789123456789":"foo", "123456789123456789":"bar"}', '123456789123456789123456789123456789')
+"foo"
+# test case sensitivity
+select json_extract('{"k1":{"k2":{"k3":12.345}}}','K1');
+json_extract('{"k1":{"k2":{"k3":12.345}}}','K1')
+NULL
+# duplicate keys will be matched at the first occurrence
+select json_extract('{"k1":"v1","k1":{"k2":"v2"}}','k1');
+json_extract('{"k1":"v1","k1":{"k2":"v2"}}','k1')
+"v1"
+# utf-8 multi-byte character
+select json_extract('{"MySQL":"开源数据库"}','MySQL');
+json_extract('{"MySQL":"开源数据库"}','MySQL')
+"开源数据库"
+select json_extract('{"开源数据库":"MySQL"}','开源数据库');
+json_extract('{"开源数据库":"MySQL"}','开源数据库')
+"MySQL"
+select json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1');
+json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1')
+[1,{"k2":["v1",2,true]},3,false]
+select json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',0);
+json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',0)
+1
+select json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1);
+json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1)
+{"k2":["v1",2,true]}
+select json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',2);
+json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',2)
+3
+select json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',3);
+json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',3)
+false
+select json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2');
+json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2')
+["v1",2,true]
+select json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',0);
+json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',0)
+"v1"
+select json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',1);
+json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',1)
+2
+select json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',2);
+json_extract('{"k1":[1,{"k2":["v1",2,true]},3,false]}','k1',1,'k2',2)
+true
+select json_extract('{"k1":"v1", "k1":"v2"}', 'k1');
+json_extract('{"k1":"v1", "k1":"v2"}', 'k1')
+"v1"
+select json_extract('{"k1":"v1", "k1":"v2", "k2":"v3"}', 'k1');
+json_extract('{"k1":"v1", "k1":"v2", "k2":"v3"}', 'k1')
+"v1"
+select json_extract('{"k1":"v1", "k2":"v2", "k2":"v3", "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":"v2", "k2":"v3", "k3":"v4"}', 'k2')
+"v2"
+select json_extract('{"k1":"v1", "k2":{"l1":"v5"}, "k2":"v3", "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":{"l1":"v5"}, "k2":"v3", "k3":"v4"}', 'k2')
+{"l1":"v5"}
+select json_extract('{"k1":"v1", "k2":[1,2,3,4], "k2":"v3", "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":[1,2,3,4], "k2":"v3", "k3":"v4"}', 'k2')
+[1,2,3,4]
+select json_extract('{"k1":"v1", "k2":"v2", "k2":{"l1":"v5"}, "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":"v2", "k2":{"l1":"v5"}, "k3":"v4"}', 'k2')
+"v2"
+select json_extract('{"k1":"v1", "k2":"v2", "k2":{"l1":"v5"}, "k3":"v4"}', 'k3');
+json_extract('{"k1":"v1", "k2":"v2", "k2":{"l1":"v5"}, "k3":"v4"}', 'k3')
+"v4"
+select json_extract('{"k1":"v1", "k2":"v2", "k2":[1,2,3,4], "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":"v2", "k2":[1,2,3,4], "k3":"v4"}', 'k2')
+"v2"
+select json_extract('{"k1":"v1", "k2":"v2", "k2":[1,2,3,4], "k3":"v4"}', 'k3');
+json_extract('{"k1":"v1", "k2":"v2", "k2":[1,2,3,4], "k3":"v4"}', 'k3')
+"v4"
+select json_extract('{"k1":"v1", "k2":false, "k2":true, "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":false, "k2":true, "k3":"v4"}', 'k2')
+false
+select json_extract('{"k1":"v1", "k2":false, "k2":true, "k3":"v4"}', 'k3');
+json_extract('{"k1":"v1", "k2":false, "k2":true, "k3":"v4"}', 'k3')
+"v4"
+select json_extract('{"k1":"v1", "k2":true, "k2":false, "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":true, "k2":false, "k3":"v4"}', 'k2')
+true
+select json_extract('{"k1":"v1", "k2":true, "k2":false, "k3":"v4"}', 'k3');
+json_extract('{"k1":"v1", "k2":true, "k2":false, "k3":"v4"}', 'k3')
+"v4"
+select json_extract('{"k1":"v1", "k2":true, "k2":23, "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":true, "k2":23, "k3":"v4"}', 'k2')
+true
+select json_extract('{"k1":"v1", "k2":true, "k2":23, "k3":"v4"}', 'k3');
+json_extract('{"k1":"v1", "k2":true, "k2":23, "k3":"v4"}', 'k3')
+"v4"
+select json_extract('{"k1":"v1", "k2":23, "k2":1.23, "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":23, "k2":1.23, "k3":"v4"}', 'k2')
+23
+select json_extract('{"k1":"v1", "k2":23, "k2":1.23, "k3":"v4"}', 'k3');
+json_extract('{"k1":"v1", "k2":23, "k2":1.23, "k3":"v4"}', 'k3')
+"v4"
+select json_extract('{"k1":"v1", "k2":null, "k2":1.23, "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":null, "k2":1.23, "k3":"v4"}', 'k2')
+null
+select json_extract('{"k1":"v1", "k2":null, "k2":1.23, "k3":"v4"}', 'k3');
+json_extract('{"k1":"v1", "k2":null, "k2":1.23, "k3":"v4"}', 'k3')
+"v4"
+select json_extract('{"k1":"v1", "k2":23, "k2":null, "k3":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":23, "k2":null, "k3":"v4"}', 'k2')
+23
+select json_extract('{"k1":"v1", "k2":23, "k2":null, "k3":"v4"}', 'k3');
+json_extract('{"k1":"v1", "k2":23, "k2":null, "k3":"v4"}', 'k3')
+"v4"
+select json_extract('{"k1":"v1", "k2":{"k4":"v5", "k4":"v6"}, "k2":"v3", "k3":"v4"}', 'k2', 'k4');
+json_extract('{"k1":"v1", "k2":{"k4":"v5", "k4":"v6"}, "k2":"v3", "k3":"v4"}', 'k2', 'k4')
+"v5"
+select json_extract('{"k1":"v1", "k2":"v3", "k2":{"k4":"v5", "k4":"v6"}, "k3":"v4"}', 'k2', 'k4');
+json_extract('{"k1":"v1", "k2":"v3", "k2":{"k4":"v5", "k4":"v6"}, "k3":"v4"}', 'k2', 'k4')
+NULL
+select json_extract('{"k1":"v1", "k2":"v2", "k1":"v3", "k2":"v4"}', 'k1');
+json_extract('{"k1":"v1", "k2":"v2", "k1":"v3", "k2":"v4"}', 'k1')
+"v1"
+select json_extract('{"k1":"v1", "k2":"v2", "k1":"v3", "k2":"v4"}', 'k2');
+json_extract('{"k1":"v1", "k2":"v2", "k1":"v3", "k2":"v4"}', 'k2')
+"v2"
+select json_extract('{"k1":"v1", "k2":[{"k4": {"k4":"v5", "k4":"v6"}}, {"k4":"v7"}], "k2":"v3", "k3":"v4"}', 'k2', 0, 'k4', 'k4');
+json_extract('{"k1":"v1", "k2":[{"k4": {"k4":"v5", "k4":"v6"}}, {"k4":"v7"}], "k2":"v3", "k3":"v4"}', 'k2', 0, 'k4', 'k4')
+"v5"
+select json_extract('{"k1":"v1", "k2":[{"k4": {"k4":"v5", "k4":"v6"}}, {"k4":"v7"}], "k2":"v3", "k3":"v4"}', 'k2', 1, 'k4', 'k4');
+json_extract('{"k1":"v1", "k2":[{"k4": {"k4":"v5", "k4":"v6"}}, {"k4":"v7"}], "k2":"v3", "k3":"v4"}', 'k2', 1, 'k4', 'k4')
+NULL
+select json_extract('{"k1":"v1", "k2":[{"k4": {"k4":"v5", "k4":"v6"}}, {"k4":"v7"}], "k2":"v3", "k3":"v4"}', 'k2', 1, 'k4');
+json_extract('{"k1":"v1", "k2":[{"k4": {"k4":"v5", "k4":"v6"}}, {"k4":"v7"}], "k2":"v3", "k3":"v4"}', 'k2', 1, 'k4')
+"v7"
+select json_extract('{"k1":{"k2": "v2", "k2" : "v3"}, "k1":{"k2": "v4", "k2" : "v5"}}', 'k1');
+json_extract('{"k1":{"k2": "v2", "k2" : "v3"}, "k1":{"k2": "v4", "k2" : "v5"}}', 'k1')
+{"k2":"v2","k2":"v3"}
+select json_extract('{"k1":{"k2": "v2", "k2" : "v3"}, "k1":{"k2": "v4", "k2" : "v5"}}', '$.k1');
+json_extract('{"k1":{"k2": "v2", "k2" : "v3"}, "k1":{"k2": "v4", "k2" : "v5"}}', '$.k1')
+{"k2": "v5"}
+select json_extract('{"0":["k1",{"2":{"3":{"4":{"5":{"6":{"7":{"8":{"9":{"10":"11"}}}}}}}}}]}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+json_extract('{"0":["k1",{"2":{"3":{"4":{"5":{"6":{"7":{"8":{"9":{"10":"11"}}}}}}}}}]}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+"11"
+select json_extract('{"0":"1"}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+json_extract('{"0":"1"}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+NULL
+select @@session.use_fb_json_functions;
+@@session.use_fb_json_functions
+use_fb_json_extract=off,use_fb_json_contains=off
+set session use_fb_json_functions = "use_fb_json_extract=on";
+select json_extract('{"k1":"v1", "k2":"v2"}', '$.k1');
+json_extract('{"k1":"v1", "k2":"v2"}', '$.k1')
+NULL
+select json_extract('{"$.k1":"v1", "k2":"v2"}', '$.k1');
+json_extract('{"$.k1":"v1", "k2":"v2"}', '$.k1')
+"v1"
+select json_extract('{"k1":"v1", "k2":"v2"}', '$.k1', '$.k2');
+json_extract('{"k1":"v1", "k2":"v2"}', '$.k1', '$.k2')
+NULL
+select json_extract('{"$.k1":"v1", "k2":"v2"}', '$.k1', '$.k2');
+json_extract('{"$.k1":"v1", "k2":"v2"}', '$.k1', '$.k2')
+NULL
+select json_extract('{"$.k1":"v1", "$.k2":"v2"}', '$.k1', '$.k2');
+json_extract('{"$.k1":"v1", "$.k2":"v2"}', '$.k1', '$.k2')
+NULL
+select json_extract('{"$.k1": {"$.k2":"v2"}}', '$.k1', '$.k2');
+json_extract('{"$.k1": {"$.k2":"v2"}}', '$.k1', '$.k2')
+"v2"
+json_extract_calls = 6
+set session use_fb_json_functions = default;
+select json_extract('{"k1":"v1", "k1":"v2"}', '$.k1');
+json_extract('{"k1":"v1", "k1":"v2"}', '$.k1')
+"v2"
+json_extract_calls = 6
+# invalid json object (expecting error)
+select json_extract('', 'k1');
+ERROR 22032: Invalid JSON text in argument 1 to function json_extract: "The document is empty." at position 0.
+#
+# json_extract_value
+#
+select json_extract_value('{"k1":"v1"}','k1');
+json_extract_value('{"k1":"v1"}','k1')
+v1
+select json_extract_value('{"k1":true}','k1');
+json_extract_value('{"k1":true}','k1')
+1
+select json_extract_value('{"k1":false}','k1');
+json_extract_value('{"k1":false}','k1')
+0
+select json_extract_value('{"k1":null}','k1');
+json_extract_value('{"k1":null}','k1')
+NULL
+select json_extract_value('{"k1":12}','k1');
+json_extract_value('{"k1":12}','k1')
+12
+select json_extract_value('{"k1":1.23}','k1');
+json_extract_value('{"k1":1.23}','k1')
+1.23
+select json_extract_value('{"0":["k1",{"2":{"3":{"4":{"5":{"6":{"7":{"8":{"9":{"10":true}}}}}}}}}]}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+json_extract_value('{"0":["k1",{"2":{"3":{"4":{"5":{"6":{"7":{"8":{"9":{"10":true}}}}}}}}}]}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+1
+select json_extract_value('{"0":"1"}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+json_extract_value('{"0":"1"}', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+NULL
+select json_extract_value('{"k1":{"k2": "v2", "k2" : "v3"}, "k1":{"k2": "v4", "k2" : "v5"}}', 'k1');
+json_extract_value('{"k1":{"k2": "v2", "k2" : "v3"}, "k1":{"k2": "v4", "k2" : "v5"}}', 'k1')
+{"k2":"v2","k2":"v3"}
+select json_extract_value('{"k1":{"k2":true}}', 'k1');
+json_extract_value('{"k1":{"k2":true}}', 'k1')
+{"k2":true}
+select json_extract_value('{"k1":{"k2":true}}', 'k1', 'k2');
+json_extract_value('{"k1":{"k2":true}}', 'k1', 'k2')
+1
+json_extract_value_calls = 11
+#
+# json_contains
+#
+set session use_fb_json_functions='use_fb_json_contains=on';
+# valid false key searches
+select json_contains('{}', 'k');
+json_contains('{}', 'k')
+0
+select json_contains('{}', 'k', 'v');
+json_contains('{}', 'k', 'v')
+0
+select json_contains('{}', 'k', 2);
+json_contains('{}', 'k', 2)
+0
+select json_contains('{}', 'k', null);
+json_contains('{}', 'k', null)
+0
+select json_contains('{}', 'k', true);
+json_contains('{}', 'k', true)
+0
+select json_contains('{}', 'k', false);
+json_contains('{}', 'k', false)
+0
+select json_contains('{"k":"v"}', 'k1');
+json_contains('{"k":"v"}', 'k1')
+0
+select json_contains('{"k":"v"}', 'k', 'v1');
+json_contains('{"k":"v"}', 'k', 'v1')
+0
+select json_contains('{"k":"2"}', 'k', 2);
+json_contains('{"k":"2"}', 'k', 2)
+0
+select json_contains('{"k":2}', 'k', 3);
+json_contains('{"k":2}', 'k', 3)
+0
+select json_contains('{"k":true}', 'k', false);
+json_contains('{"k":true}', 'k', false)
+0
+select json_contains('{"k":false}', 'k', true);
+json_contains('{"k":false}', 'k', true)
+0
+select json_contains('{"k":null}', 'k', 0);
+json_contains('{"k":null}', 'k', 0)
+0
+select json_contains('{"k":{"k1":"v"}}', 'k', 'v');
+json_contains('{"k":{"k1":"v"}}', 'k', 'v')
+0
+select json_contains('["k","v"]', 'k', 'v');
+json_contains('["k","v"]', 'k', 'v')
+0
+select json_contains('["k","v"]', 'k');
+json_contains('["k","v"]', 'k')
+0
+select json_contains('{"k":{"k1":"v"}}', 'k', '{"k1":"v"}');
+json_contains('{"k":{"k1":"v"}}', 'k', '{"k1":"v"}')
+0
+select json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"v"}', JSON));
+json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"v"}', JSON))
+0
+select json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"v1_"}', JSON));
+json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"v1_"}', JSON))
+0
+select json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"v2%"}', JSON));
+json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"v2%"}', JSON))
+0
+select json_contains('{"1234":"foo", "123456789123456789":"bar"}', '12345');
+json_contains('{"1234":"foo", "123456789123456789":"bar"}', '12345')
+0
+select json_contains('{"1234":"foo", "123456789123456789":"bar"}', '123456789123456789123456789');
+json_contains('{"1234":"foo", "123456789123456789":"bar"}', '123456789123456789123456789')
+0
+# valid true key searches on first level
+select json_contains('{"k":"v"}', 'k');
+json_contains('{"k":"v"}', 'k')
+1
+select json_contains('{"k":"v"}', 'k', 'v');
+json_contains('{"k":"v"}', 'k', 'v')
+1
+select json_contains('{"k":"2"}', 'k', '2');
+json_contains('{"k":"2"}', 'k', '2')
+1
+select json_contains('{"k":2}', 'k', 2);
+json_contains('{"k":2}', 'k', 2)
+1
+select json_contains('{"k":true}', 'k', true);
+json_contains('{"k":true}', 'k', true)
+1
+select json_contains('{"k":false}', 'k', false);
+json_contains('{"k":false}', 'k', false)
+1
+select json_contains('{"k":null}', 'k', null);
+json_contains('{"k":null}', 'k', null)
+1
+select json_contains('{"k":{"k1":"v"}}', 'k', CONVERT('{"k1":"v"}', JSON));
+json_contains('{"k":{"k1":"v"}}', 'k', CONVERT('{"k1":"v"}', JSON))
+1
+select json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"_1"}', JSON));
+json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"_1"}', JSON))
+0
+select json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"%"}', JSON));
+json_contains('{"k":{"k1":"v1"}}', 'k', CONVERT('{"k1":"%"}', JSON))
+0
+select json_contains('{"1234":"foo", "123456789123456789":"bar"}', '1234');
+json_contains('{"1234":"foo", "123456789123456789":"bar"}', '1234')
+1
+select json_contains('{"1234":"foo", "123456789123456789":"bar"}', '123456789123456789');
+json_contains('{"1234":"foo", "123456789123456789":"bar"}', '123456789123456789')
+1
+select json_contains('{"123456789123456789123456789123456789":"foo", "123456789123456789":"bar"}', '123456789123456789123456789123456789');
+json_contains('{"123456789123456789123456789123456789":"foo", "123456789123456789":"bar"}', '123456789123456789123456789123456789')
+1
+# valid true key searches not on first level
+select json_contains('{"k1":{"k":"v"}}', 'k');
+json_contains('{"k1":{"k":"v"}}', 'k')
+1
+select json_contains('{"k1":{"k":"v"}}', 'k', 'v');
+json_contains('{"k1":{"k":"v"}}', 'k', 'v')
+1
+select json_contains('[{"k":"v"}]', 'k');
+json_contains('[{"k":"v"}]', 'k')
+1
+select json_contains('[{"k":"v"}]', 'k', 'v');
+json_contains('[{"k":"v"}]', 'k', 'v')
+1
+select json_contains('{"k":{"k":"2"}}', 'k', '2');
+json_contains('{"k":{"k":"2"}}', 'k', '2')
+1
+select json_contains('[{"k":"2"}]', 'k', '2');
+json_contains('[{"k":"2"}]', 'k', '2')
+1
+select json_contains('{"k":{"k":true}}', 'k', true);
+json_contains('{"k":{"k":true}}', 'k', true)
+1
+select json_contains('[{"k":true}]', 'k', true);
+json_contains('[{"k":true}]', 'k', true)
+1
+select json_contains('{"k":{"k":false}}', 'k', false);
+json_contains('{"k":{"k":false}}', 'k', false)
+1
+select json_contains('[{"k":false}]', 'k', false);
+json_contains('[{"k":false}]', 'k', false)
+1
+select json_contains('{"k":{"k":null}}', 'k', null);
+json_contains('{"k":{"k":null}}', 'k', null)
+1
+select json_contains('[{"k":null}]', 'k', null);
+json_contains('[{"k":null}]', 'k', null)
+1
+select json_contains('{"k1":{"k2":{"k3":"v3", "k4":"v4"}}}', 'k2', CONVERT('{"k4":"v4", "k3":"v3"}', JSON));
+json_contains('{"k1":{"k2":{"k3":"v3", "k4":"v4"}}}', 'k2', CONVERT('{"k4":"v4", "k3":"v3"}', JSON))
+1
+select json_contains('{"k1":{"k2":{"k3":"v3", "k4":"v4"}}}', 'k2', CONVERT('{"k4":"v_", "k3":"%"}', JSON));
+json_contains('{"k1":{"k2":{"k3":"v3", "k4":"v4"}}}', 'k2', CONVERT('{"k4":"v_", "k3":"%"}', JSON))
+0
+select json_contains('{"k":{"k1":{"k3":"v3"}, "k1":{"k3":"v4"}}}', 'k3', 'v3');
+json_contains('{"k":{"k1":{"k3":"v3"}, "k1":{"k3":"v4"}}}', 'k3', 'v3')
+1
+select json_contains('{"k":{"k1":{"k3":"v3"}, "k1":{"k3":"v4"}}}', 'k3', 'v4');
+json_contains('{"k":{"k1":{"k3":"v3"}, "k1":{"k3":"v4"}}}', 'k3', 'v4')
+1
+select json_contains('{"k":{"k1":{"k3":"v3"}, "k1":{"k3":"v4"}}}', 'k3');
+json_contains('{"k":{"k1":{"k3":"v3"}, "k1":{"k3":"v4"}}}', 'k3')
+1
+select json_contains('{"k":{"k1":{"k3":"v3"}, "k1":{"k3":"v4"}}}', 'k3', 'v5');
+json_contains('{"k":{"k1":{"k3":"v3"}, "k1":{"k3":"v4"}}}', 'k3', 'v5')
+0
+# Values containing json objects returned by nested calls
+select json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1','{"k2":"v1", "k2":"v2", "k3":"v3"}');
+json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1','{"k2":"v1", "k2":"v2", "k3":"v3"}')
+0
+select json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1',CONVERT('{"k2":"v1", "k2":"v2", "k3":"v3"}', JSON));
+json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1',CONVERT('{"k2":"v1", "k2":"v2", "k3":"v3"}', JSON))
+0
+select json_contains('{"k":{"k1":{"k2":"v2", "k3":"v3"}}}', 'k1',CONVERT('{"k2":"v1", "k2":"v2", "k3":"v3"}', JSON));
+json_contains('{"k":{"k1":{"k2":"v2", "k3":"v3"}}}', 'k1',CONVERT('{"k2":"v1", "k2":"v2", "k3":"v3"}', JSON))
+1
+select json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k', 'k1'));
+json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k', 'k1'))
+1
+select json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v2", "k2":"v1", "k3":"v3"}}}', 'k', 'k1'));
+json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v2", "k2":"v1", "k3":"v3"}}}', 'k', 'k1'))
+0
+select json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract_value('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k', 'k1'));
+json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract_value('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k', 'k1'))
+0
+select json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract_value('{"k":{"k1":{"k2":"v2", "k2":"v1", "k3":"v3"}}}', 'k', 'k1'));
+json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract_value('{"k":{"k1":{"k2":"v2", "k2":"v1", "k3":"v3"}}}', 'k', 'k1'))
+0
+select json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', '$.k.k1'));
+json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', '$.k.k1'))
+0
+select json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v2", "k2":"v1", "k3":"v3"}}}', '$.k.k1'));
+json_contains('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v2", "k2":"v1", "k3":"v3"}}}', '$.k.k1'))
+0
+select json_contains('{"k":{"k1":{"k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', '$.k.k1'));
+json_contains('{"k":{"k1":{"k2":"v2", "k3":"v3"}}}', 'k1', json_extract('{"k":{"k1":{"k2":"v1", "k2":"v2", "k3":"v3"}}}', '$.k.k1'))
+1
+select json_contains('[{"MySQL":"开源数据库"},"MySQL"]', 'MySQL');
+json_contains('[{"MySQL":"开源数据库"},"MySQL"]', 'MySQL')
+1
+select json_contains('[{"MySQL":"开源数据库"},"MySQL"]', 'MySQL', '开源数据库');
+json_contains('[{"MySQL":"开源数据库"},"MySQL"]', 'MySQL', '开源数据库')
+1
+select json_contains('[{"开源数据库":"MySQL"},"开源数据库"]', '开源数据库');
+json_contains('[{"开源数据库":"MySQL"},"开源数据库"]', '开源数据库')
+1
+select json_contains('[{"开源数据库":"MySQL"},"开源数据库"]', '开源数据库', 'MySQL');
+json_contains('[{"开源数据库":"MySQL"},"开源数据库"]', '开源数据库', 'MySQL')
+1
+json_contains_calls = 4
+select json_contains('["a", "b", "k"]', 'k');
+json_contains('["a", "b", "k"]', 'k')
+0
+select json_contains('[{"k1":"v1"}, {"k2":"v2"}, {"k1":"v3"}]', 'k1');
+json_contains('[{"k1":"v1"}, {"k2":"v2"}, {"k1":"v3"}]', 'k1')
+1
+select json_contains('[{"k1":"v1"}, {"k2":"v2"}, {"k1":"v3"}]', 'k1', 'v1');
+json_contains('[{"k1":"v1"}, {"k2":"v2"}, {"k1":"v3"}]', 'k1', 'v1')
+1
+select json_contains('[{"k1":"v1"}, {"k2":"v2"}, {"k1":"v3"}]', 'k1', 'v3');
+json_contains('[{"k1":"v1"}, {"k2":"v2"}, {"k1":"v3"}]', 'k1', 'v3')
+1
+select json_contains('[{"k1":"v1"}, {"k2":"v2"}, {"k1":"v3"}]', 'k1', 'v2');
+json_contains('[{"k1":"v1"}, {"k2":"v2"}, {"k1":"v3"}]', 'k1', 'v2')
+0
+select json_contains('{"k1":{"k2":{"k3":[{"k4":"v4"}]}}, "k5": {"k4":null}}', 'k4');
+json_contains('{"k1":{"k2":{"k3":[{"k4":"v4"}]}}, "k5": {"k4":null}}', 'k4')
+1
+select json_contains('{"k1":{"k2":{"k3":[{"k4":"v4"}]}}, "k5": {"k4":"v5"}}', 'k4', 'v4');
+json_contains('{"k1":{"k2":{"k3":[{"k4":"v4"}]}}, "k5": {"k4":"v5"}}', 'k4', 'v4')
+1
+select json_contains('{"k1":{"k2":{"k3":[{"k4":"v4"}]}}, "k5": {"k4":"v5"}}', 'k4', 'v5');
+json_contains('{"k1":{"k2":{"k3":[{"k4":"v4"}]}}, "k5": {"k4":"v5"}}', 'k4', 'v5')
+1
+select json_contains('{"k1":{"k2":{"k3":[{"k4":"v4"}]}}, "k5": {"k4":"v5"}}', 'k4', 'v6');
+json_contains('{"k1":{"k2":{"k3":[{"k4":"v4"}]}}, "k5": {"k4":"v5"}}', 'k4', 'v6')
+0
+select json_contains('{"k":"v"}', '$.k');
+json_contains('{"k":"v"}', '$.k')
+0
+select json_contains('{"k": {"k2":"v2"}}', '$.k.k2');
+json_contains('{"k": {"k2":"v2"}}', '$.k.k2')
+0
+select json_contains('{"k": {"k2":"v2"}}', '$**.k2');
+json_contains('{"k": {"k2":"v2"}}', '$**.k2')
+0
+select json_contains('{"k": {"k2":"v2"}}', '$.*.k2');
+json_contains('{"k": {"k2":"v2"}}', '$.*.k2')
+0
+select json_contains('{"$.k":"v"}', '$.k');
+json_contains('{"$.k":"v"}', '$.k')
+1
+select json_contains('{"k": {"$.k.k2":"v2"}}', '$.k.k2', 'v2');
+json_contains('{"k": {"$.k.k2":"v2"}}', '$.k.k2', 'v2')
+1
+select json_contains('{"k": {"$**.k2":"v2"}}', '$**.k2', 'v2');
+json_contains('{"k": {"$**.k2":"v2"}}', '$**.k2', 'v2')
+1
+select json_contains('{"k": {"$.*.k2":"v2"}}', '$.*.k2', 'v2');
+json_contains('{"k": {"$.*.k2":"v2"}}', '$.*.k2', 'v2')
+1
+select json_contains('{"k":"\\\"v"}', 'k', '"v');
+json_contains('{"k":"\\\"v"}', 'k', '"v')
+1
+select json_contains('{"k":"\\\"\\\\t"}', 'k', '"\\t');
+json_contains('{"k":"\\\"\\\\t"}', 'k', '"\\t')
+1
+select json_contains('{"k":true}', 'k', CONVERT(1, DOUBLE));
+json_contains('{"k":true}', 'k', CONVERT(1, DOUBLE))
+1
+select json_contains('{"k":true}', 'k', CONVERT(1, DECIMAL));
+json_contains('{"k":true}', 'k', CONVERT(1, DECIMAL))
+1
+select json_contains('{"k":true}', 'k', CONVERT(1, UNSIGNED));
+json_contains('{"k":true}', 'k', CONVERT(1, UNSIGNED))
+1
+select json_contains('{"k":true}', 'k', 1);
+json_contains('{"k":true}', 'k', 1)
+1
+select json_contains('{"k":true}', 'k', CONVERT(0, DOUBLE));
+json_contains('{"k":true}', 'k', CONVERT(0, DOUBLE))
+0
+select json_contains('{"k":true}', 'k', CONVERT(0, DECIMAL));
+json_contains('{"k":true}', 'k', CONVERT(0, DECIMAL))
+0
+select json_contains('{"k":true}', 'k', CONVERT(0, UNSIGNED));
+json_contains('{"k":true}', 'k', CONVERT(0, UNSIGNED))
+0
+select json_contains('{"k":true}', 'k', 0);
+json_contains('{"k":true}', 'k', 0)
+0
+select json_contains('{"k":false}', 'k', CONVERT(1, DOUBLE));
+json_contains('{"k":false}', 'k', CONVERT(1, DOUBLE))
+0
+select json_contains('{"k":false}', 'k', CONVERT(1, DECIMAL));
+json_contains('{"k":false}', 'k', CONVERT(1, DECIMAL))
+0
+select json_contains('{"k":false}', 'k', CONVERT(1, UNSIGNED));
+json_contains('{"k":false}', 'k', CONVERT(1, UNSIGNED))
+0
+select json_contains('{"k":false}', 'k', 1);
+json_contains('{"k":false}', 'k', 1)
+0
+select json_contains('{"k":false}', 'k', CONVERT(0, DOUBLE));
+json_contains('{"k":false}', 'k', CONVERT(0, DOUBLE))
+1
+select json_contains('{"k":false}', 'k', CONVERT(0, DECIMAL));
+json_contains('{"k":false}', 'k', CONVERT(0, DECIMAL))
+1
+select json_contains('{"k":false}', 'k', CONVERT(0, UNSIGNED));
+json_contains('{"k":false}', 'k', CONVERT(0, UNSIGNED))
+1
+select json_contains('{"k":false}', 'k', 0);
+json_contains('{"k":false}', 'k', 0)
+1
+select json_contains('{"k":true}', 'k', CONVERT(2, DOUBLE));
+json_contains('{"k":true}', 'k', CONVERT(2, DOUBLE))
+0
+select json_contains('{"k":true}', 'k', CONVERT(2, DECIMAL));
+json_contains('{"k":true}', 'k', CONVERT(2, DECIMAL))
+0
+select json_contains('{"k":true}', 'k', CONVERT(2, UNSIGNED));
+json_contains('{"k":true}', 'k', CONVERT(2, UNSIGNED))
+0
+select json_contains('{"k":true}', 'k', 2);
+json_contains('{"k":true}', 'k', 2)
+0
+select json_contains('{"k":false}', 'k', CONVERT(2, DOUBLE));
+json_contains('{"k":false}', 'k', CONVERT(2, DOUBLE))
+0
+select json_contains('{"k":false}', 'k', CONVERT(2, DECIMAL));
+json_contains('{"k":false}', 'k', CONVERT(2, DECIMAL))
+0
+select json_contains('{"k":false}', 'k', CONVERT(2, UNSIGNED));
+json_contains('{"k":false}', 'k', CONVERT(2, UNSIGNED))
+0
+select json_contains('{"k":false}', 'k', 2);
+json_contains('{"k":false}', 'k', 2)
+0
+select json_contains('{"k":123456789011121314151617181920}', 'k', true);
+json_contains('{"k":123456789011121314151617181920}', 'k', true)
+0
+select json_contains('{"k":1}', 'k', true);
+json_contains('{"k":1}', 'k', true)
+1
+select json_contains('{"k": 123.456}', 'k', true);
+json_contains('{"k": 123.456}', 'k', true)
+0
+select json_contains('{"k":123456789011121314151617181920}', 'k', false);
+json_contains('{"k":123456789011121314151617181920}', 'k', false)
+0
+select json_contains('{"k":0}', 'k', false);
+json_contains('{"k":0}', 'k', false)
+1
+select json_contains('{"k": 123.456}', 'k', false);
+json_contains('{"k": 123.456}', 'k', false)
+0
+select json_contains('{}');
+ERROR 42000: Incorrect parameter count in the call to native function 'json_contains'
+select json_contains(null);
+ERROR 42000: Incorrect parameter count in the call to native function 'json_contains'
+select json_contains(2);
+ERROR 42000: Incorrect parameter count in the call to native function 'json_contains'
+select json_contains('{}', 'k', 'k', 'k');
+ERROR 42000: Incorrect parameter count in the call to native function 'json_contains'
+select json_contains('{}', 'k1', 'k2', 'k3');
+ERROR 42000: Incorrect parameter count in the call to native function 'json_contains'
+select json_contains('{}', 'k1', 'k2', 'k3', 'k4');
+ERROR 42000: Incorrect parameter count in the call to native function 'json_contains'
+select json_contains('{}', 2);
+ERROR HY000: Incorrect arguments to KEY MUST BE STRING
+select json_contains('{}', null);
+ERROR HY000: Incorrect arguments to KEY MUST BE STRING
+select json_contains('{}', true);
+ERROR HY000: Incorrect arguments to KEY MUST BE STRING
+select json_contains('{}', false);
+ERROR HY000: Incorrect arguments to KEY MUST BE STRING
+select json_contains('foo', 'k');
+ERROR 22032: Invalid JSON text in argument 1 to function json_contains: "Invalid value." at position 1.
+select json_contains(2, 'k');
+ERROR 22032: Invalid data type for JSON data in argument 1 to function json_contains; a JSON string or JSON type is required.
+select json_contains(true, 'k');
+ERROR 22032: Invalid data type for JSON data in argument 1 to function json_contains; a JSON string or JSON type is required.
+select json_contains(null, 'k');
+ERROR 22032: Invalid data type for JSON data in argument 1 to function json_contains; a JSON string or JSON type is required.
+CREATE TABLE `t1` (
+`col1` varchar(512) NOT NULL,
+`col2` json NOT NULL,
+`col3` varchar(255) GENERATED ALWAYS AS (json_unquote(json_extract(`col2`,_latin1'$.name'))) STORED NOT NULL,
+PRIMARY KEY (`col1`)
+) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+set use_fb_json_functions='use_fb_json_extract=on,use_fb_json_contains=on';
+INSERT INTO t1 (col1, col2) VALUES ("test_name", "{\"name\":\"test_name\"}");
+ERROR 23000: Column 'col3' cannot be null
+set use_fb_json_functions='use_fb_json_extract=off,use_fb_json_contains=off';
+INSERT INTO t1 (col1, col2) VALUES ("test_name", "{\"name\":\"test_name\"}");
+SELECT * FROM t1;
+col1	col2	col3
+test_name	{"name": "test_name"}	test_name
+DROP TABLE t1;
+set session use_fb_json_functions='default';

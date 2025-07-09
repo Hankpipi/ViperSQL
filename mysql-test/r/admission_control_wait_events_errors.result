@@ -1,0 +1,78 @@
+create database test_db;
+create user test_user@localhost;
+grant all on test_db.* to test_user@localhost;
+use test_db;
+create table t1(a int) engine=InnoDB;
+set @save_max_running_queries = @@max_running_queries;
+set @save_admission_control_queue_timeout = @@admission_control_queue_timeout;
+set @save_admission_control_wait_events = @@admission_control_wait_events;
+set @@global.max_running_queries=1;
+set @@global.admission_control_queue_timeout=0;
+set @@global.sql_findings_control=on;
+
+# Test 1: MDL table lock.
+#
+set @@global.admission_control_wait_events='META_DATA_LOCK';
+lock table t1 write;
+insert into t1 values(1);
+select sleep(1000);
+unlock tables;
+ERROR HY000: Got timeout while waiting on admission control queue for database `test_db`
+sleep(1000)
+1
+
+# Test 2: Row lock with update.
+#
+set @@global.admission_control_wait_events='ROW_LOCK';
+insert into t1 values(1);
+begin;
+update t1 set a = 2 where a = 1;
+update t1 set a = 2 where a = 1;
+select sleep(1000);
+rollback;
+ERROR HY000: Got timeout while waiting on admission control queue for database `test_db`
+sleep(1000)
+1
+
+# Test 3: Gap lock with insert.
+#
+CREATE TABLE t2 (id int NOT NULL, PRIMARY KEY(id)) ENGINE=InnoDB;
+insert into t2 values(100);
+begin;
+select * from t2 where id <= 100 for update;
+id
+100
+insert into t2 values(80);
+select sleep(1000);
+rollback;
+ERROR HY000: Got timeout while waiting on admission control queue for database `test_db`
+sleep(1000)
+1
+
+# Test 4: Row lock with delete.
+#
+begin;
+update t1 set a = 2 where a = 1;
+delete from t1 where a = 1;
+select sleep(1000);
+rollback;
+ERROR HY000: Got timeout while waiting on admission control queue for database `test_db`
+sleep(1000)
+1
+
+# Cleanup
+#
+drop table t1;
+drop table t2;
+select schema_name, error, mode, exits, admissions, queue, queue_boosts, sql_id, info from information_schema.admission_control_errors;
+schema_name	error	mode	exits	admissions	queue	queue_boosts	sql_id	info
+test_db	TIMEOUT	HIGH_PRI	0	2	0	1	94ebfd70cb7f106292beeb595b827991	{"q0":{"wait":0, "run":1}}
+test_db	TIMEOUT	HIGH_PRI	0	2	0	1	ea8d7221939e31cd79bb5a0800f1c421	{"q0":{"wait":0, "run":1}}
+test_db	TIMEOUT	HIGH_PRI	0	2	0	1	a4e3c7e73c9474dc3f946ad4a3cb9e3e	{"q0":{"wait":0, "run":1}}
+test_db	TIMEOUT	HIGH_PRI	0	2	0	1	de4ac3f385e51f51f081f37368d6e55f	{"q0":{"wait":0, "run":1}}
+set global max_running_queries = @save_max_running_queries;
+set global admission_control_queue_timeout = @save_admission_control_queue_timeout;
+set global admission_control_wait_events = @save_admission_control_wait_events;
+set global sql_findings_control = default;
+drop database test_db;
+drop user test_user@localhost;

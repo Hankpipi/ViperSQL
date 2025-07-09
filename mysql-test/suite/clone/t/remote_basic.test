@@ -1,0 +1,12 @@
+# Test clone remote command
+
+--let $HOST = 127.0.0.1
+--let $PORT =`select @@port`
+--let $USER = root
+--let remote_clone = 1
+
+--source local_basic.test
+
+--echo set donor list to any
+--let $any_donor_address = 1
+--source local_basic.test

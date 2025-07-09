@@ -1,0 +1,44 @@
+# Attempting to set read_only or super_read_only on would occassionally block
+# if there was a long running modification statement (INSERT, UPDATE, DELETE,
+# REPLACE, etc.).  This was because of contention on the global read lock.
+# The code to handle setting the read_only flags has been modified to not
+# acquire the global read lock
+
+--source include/count_sessions.inc
+
+SET @save_legacy_global_read_lock_mode = @@global.legacy_global_read_lock_mode;
+SET @save_blackhole_transactions = @@global.blackhole_transactions;
+
+connect(con1,localhost,root,,);
+connect(con2,localhost,root,,);
+
+--let $engine=INNODB
+--let $should_fail_on_commit=1
+--source global_read_lock_combinations.inc
+
+# Now do the exact same tests with RocksDB table
+--let $engine=ROCKSDB
+--let $should_fail_on_commit=1
+--source global_read_lock_combinations.inc
+
+# Now do the exact same tests with Blackhole table with transactions
+SET @@global.blackhole_transactions = 1;
+--let $engine=BLACKHOLE
+--let $should_fail_on_commit=1
+--source global_read_lock_combinations.inc
+
+# Now do the exact same tests with Blackhole table without transactions
+SET @@global.blackhole_transactions = 0;
+--let $engine=BLACKHOLE
+--let $should_fail_on_commit=0
+--source global_read_lock_combinations.inc
+
+# Restore sysvars
+SET @@global.legacy_global_read_lock_mode = @save_legacy_global_read_lock_mode;
+SET @@global.blackhole_transactions = @save_blackhole_transactions;
+
+# Cleanup connections
+connection default;
+disconnect con1;
+disconnect con2;
+--source include/wait_until_count_sessions.inc

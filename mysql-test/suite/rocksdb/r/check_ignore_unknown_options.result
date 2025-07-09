@@ -1,0 +1,6 @@
+select variable_name, variable_value from performance_schema.global_variables where variable_name="rocksdb_ignore_unknown_options";
+variable_name	variable_value
+rocksdb_ignore_unknown_options	ON
+select variable_name, variable_value from performance_schema.global_variables where variable_name="rocksdb_ignore_unknown_options";
+variable_name	variable_value
+rocksdb_ignore_unknown_options	ON

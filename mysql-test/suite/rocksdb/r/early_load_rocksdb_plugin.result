@@ -1,0 +1,19 @@
+# shut server down
+# Server is down
+#
+# Run the server with --help (a too-restrictive assert regression test)
+#
+#
+# Run the server with --initialize
+#
+#
+# Error log checks
+#
+Occurrences of 'Check RocksDB:Init column families' in the input file: 0
+Occurrences of 'Check Data dictionary initializing' in the input file: 0
+#
+# Cleanup
+#
+# Restarting the server
+# restart
+# Remove data dir and log file.

@@ -1,0 +1,40 @@
+-- source include/load_sysvars.inc
+
+####
+# Verify default value true
+####
+--echo Default value of use_mdl_mutex is true
+SELECT @@global.use_mdl_mutex;
+
+####
+# Verify that this is not a session variable
+####
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SELECT @@session.use_mdl_mutex;
+--echo Expected error 'Variable is a GLOBAL variable'
+
+--echo use_mdl_mutex is a read-only variable
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@global.use_mdl_mutex = false;
+SELECT @@global.use_mdl_mutex;
+
+####
+## Restart the server with a non default value of the variable
+####
+--echo Restart the server with non default value (OFF)
+--let $restart_parameters="restart: --use_mdl_mutex=OFF"
+--source include/restart_mysqld.inc
+
+SELECT @@global.use_mdl_mutex;
+
+--echo use_mdl_mutex is still a read-only variable
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@global.use_mdl_mutex = true;
+SELECT @@global.use_mdl_mutex;
+
+
+--echo Restart the server with default value (ON)
+--let $restart_parameters="restart: "
+--source include/restart_mysqld.inc
+
+SELECT @@global.use_mdl_mutex;

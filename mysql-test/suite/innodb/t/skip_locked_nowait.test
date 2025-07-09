@@ -1,0 +1,8 @@
+#
+# wl#8919  Implement NOWAIT and SKIP LOCKED
+#
+
+--source include/not_hypergraph.inc   # Depends on indexes being used, which the hypergraph optimizer does not support.
+
+--let $engine=INNODB
+--source include/skip_locked_nowait.inc

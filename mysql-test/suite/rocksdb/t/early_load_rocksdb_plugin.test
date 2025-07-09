@@ -1,0 +1,48 @@
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+
+# Set the default ddse to Rocksdb
+# Bootstrap by starting mysqld with --initialize
+# Rocksdb plugin will be loaded in early stage of plugin_register_builtin_and_init_core_se
+
+let BASEDIR= `select @@basedir`;
+let DDIR=$MYSQL_TMP_DIR/installdb_test;
+let MYSQLD_LOG=$MYSQL_TMP_DIR/server.log;
+let extra_args=--no-defaults --basedir=$BASEDIR --debug=+d,ddse_rocksdb;
+
+--echo # shut server down
+--source include/shutdown_mysqld.inc
+--echo # Server is down
+
+--echo #
+--echo # Run the server with --help (a too-restrictive assert regression test)
+--echo #
+--exec $MYSQLD --verbose --help --default_dd_system_storage_engine=RocksDB > /dev/null 2>&1
+
+
+--echo #
+--echo # Run the server with --initialize
+--echo #
+--exec $MYSQLD $extra_args --initialize --default_dd_system_storage_engine=RocksDB --datadir=$DDIR --log-error-verbosity=3 > $MYSQLD_LOG 2>&1
+--force-rmdir $DDIR
+--echo #
+--echo # Error log checks
+--echo #
+--let $grep_file= $MYSQLD_LOG 
+--let $grep_pattern=Check RocksDB:Init column families
+--let $grep_output= print_count
+--source include/grep_pattern.inc
+
+--let $grep_file= $MYSQLD_LOG 
+--let $grep_pattern=Check Data dictionary initializing
+--let $grep_output= print_count
+--source include/grep_pattern.inc
+
+--echo #
+--echo # Cleanup
+--echo #
+--echo # Restarting the server
+--source include/start_mysqld.inc
+
+--echo # Remove data dir and log file.
+--remove_file $MYSQLD_LOG

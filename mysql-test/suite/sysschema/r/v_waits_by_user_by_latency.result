@@ -1,0 +1,18 @@
+DESC sys.waits_by_user_by_latency;
+Field	Type	Null	Key	Default	Extra
+user	varchar(80)	X		X	
+event	varchar(128)	X		X	
+total	bigint unsigned	X		X	
+total_latency	varchar(11)	X		X	
+avg_latency	varchar(11)	X		X	
+max_latency	varchar(11)	X		X	
+SELECT * FROM sys.waits_by_user_by_latency;
+DESC sys.x$waits_by_user_by_latency;
+Field	Type	Null	Key	Default	Extra
+user	varchar(80)	X		X	
+event	varchar(128)	X		X	
+total	bigint unsigned	X		X	
+total_latency	bigint unsigned	X		X	
+avg_latency	bigint unsigned	X		X	
+max_latency	bigint unsigned	X		X	
+SELECT * FROM sys.x$waits_by_user_by_latency;

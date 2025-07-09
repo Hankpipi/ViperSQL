@@ -1,0 +1,6 @@
+# Upgrade and DDSE change at the same time is not supported
+--source include/have_innodb_ddse.inc
+--source include/have_nodebug.inc
+
+--let $OLD_VERSION = 8017
+--source suite/innodb/include/partition_upgrade.inc

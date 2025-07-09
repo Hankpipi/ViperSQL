@@ -1,0 +1,142 @@
+use test;
+CREATE TABLE t1 (
+a int not null auto_increment,
+b int not null,
+c int not null,
+d varchar(2000),
+e varchar(2000),
+primary key (a, b, c),
+key c_idx (c)
+);
+SELECT COUNT(*) INTO @numrows FROM t1;
+SELECT @numrows;
+@numrows
+1024
+DUMP TABLE t1 INTO 't1dump' 
+Num chunks dumped: 8
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 1 )
+Num chunks dumped: 8
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 2 )
+Num chunks dumped: 8
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 4 )
+Num chunks dumped: 8
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 8 )
+Num chunks dumped: 8
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 2, CHUNK_SIZE = 5 ROWS )
+Num chunks dumped: 205
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 2, CHUNK_SIZE = 50 ROWS )
+Num chunks dumped: 21
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 2, CHUNK_SIZE = 2000 ROWS )
+Num chunks dumped: 1
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 2, CHUNK_SIZE = 4 KB )
+Num chunks dumped: 303
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 2, CHUNK_SIZE = 7 KB )
+Num chunks dumped: 173
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 3, CHUNK_SIZE = 101 KB )
+Num chunks dumped: 12
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 2, CHUNK_SIZE = 1 MB )
+Num chunks dumped: 2
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 8, CHUNK_SIZE = 4 MB )
+Num chunks dumped: 1
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 4, CHUNK_SIZE = 1 GB )
+Num chunks dumped: 1
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 16, CHUNK_SIZE = 2 GB )
+Num chunks dumped: 1
+CREATE TABLE t1load AS SELECT * FROM t1 LIMIT 0;
+SELECT COUNT(*) FROM t1load;
+COUNT(*)
+1024
+DROP TABLE t1load;
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = -10 );
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '-10 )' at line 1
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 'abc' );
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near ''abc' )' at line 1
+DUMP TABLE t1 INTO 't1dump' WITH ( THREADS = 0 );
+ERROR HY000: Incorrect arguments to THREADS
+DUMP TABLE t1 INTO 't1dump' WITH ( CHUNK_SIZE = 0 KB );
+ERROR HY000: Incorrect arguments to CHUNK_SIZE
+DUMP TABLE t1 INTO 't1dump' WITH ( CHUNK_SIZE = -1 KB );
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '-1 KB )' at line 1
+DUMP TABLE t1 INTO 't1dump' WITH ( CHUNK_SIZE = 0 ROWS );
+ERROR HY000: Incorrect arguments to CHUNK_SIZE
+DUMP TABLE t1 INTO 't1dump' WITH ( CHUNK_SIZE = 1 TB );
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'TB )' at line 1
+Test PK requirement
+CREATE TABLE t2_nopk (
+a int not null,
+b int not null
+);
+DUMP TABLE t2_nopk INTO 't1dump';
+ERROR 42000: This table type requires a primary key
+DROP TABLE t2_nopk;
+DROP TABLE t1;

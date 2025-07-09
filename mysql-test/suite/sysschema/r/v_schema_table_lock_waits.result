@@ -1,0 +1,63 @@
+DESC sys.schema_table_lock_waits;
+Field	Type	Null	Key	Default	Extra
+object_schema	varchar(64)	X		X	
+object_name	varchar(64)	X		X	
+waiting_thread_id	bigint unsigned	X		X	
+waiting_pid	bigint unsigned	X		X	
+waiting_account	text	X		X	
+waiting_lock_type	varchar(32)	X		X	
+waiting_lock_duration	varchar(32)	X		X	
+waiting_query	longtext	X		X	
+waiting_query_secs	bigint	X		X	
+waiting_query_rows_affected	bigint unsigned	X		X	
+waiting_query_rows_examined	bigint unsigned	X		X	
+blocking_thread_id	bigint unsigned	X		X	
+blocking_pid	bigint unsigned	X		X	
+blocking_account	text	X		X	
+blocking_lock_type	varchar(32)	X		X	
+blocking_lock_duration	varchar(32)	X		X	
+sql_kill_blocking_query	varchar(31)	X		X	
+sql_kill_blocking_connection	varchar(25)	X		X	
+SELECT * FROM sys.schema_table_lock_waits;
+DESC sys.x$schema_table_lock_waits;
+Field	Type	Null	Key	Default	Extra
+object_schema	varchar(64)	X		X	
+object_name	varchar(64)	X		X	
+waiting_thread_id	bigint unsigned	X		X	
+waiting_pid	bigint unsigned	X		X	
+waiting_account	text	X		X	
+waiting_lock_type	varchar(32)	X		X	
+waiting_lock_duration	varchar(32)	X		X	
+waiting_query	longtext	X		X	
+waiting_query_secs	bigint	X		X	
+waiting_query_rows_affected	bigint unsigned	X		X	
+waiting_query_rows_examined	bigint unsigned	X		X	
+blocking_thread_id	bigint unsigned	X		X	
+blocking_pid	bigint unsigned	X		X	
+blocking_account	text	X		X	
+blocking_lock_type	varchar(32)	X		X	
+blocking_lock_duration	varchar(32)	X		X	
+sql_kill_blocking_query	varchar(31)	X		X	
+sql_kill_blocking_connection	varchar(25)	X		X	
+SELECT * FROM sys.x$schema_table_lock_waits;
+CREATE TABLE test.lock_waits (i INT PRIMARY KEY, j INT) ENGINE = InnoDB;
+LOCK TABLE lock_waits WRITE;
+ALTER TABLE test.lock_waits ADD k VARCHAR(20);
+SELECT SLEEP(1);
+SLEEP(1)
+0
+SELECT object_schema, object_name,
+waiting_account, waiting_lock_type, waiting_query,
+blocking_account, blocking_lock_type, blocking_lock_duration
+FROM sys.schema_table_lock_waits;
+object_schema	object_name	waiting_account	waiting_lock_type	waiting_query	blocking_account	blocking_lock_type	blocking_lock_duration
+test	lock_waits	root@localhost	SHARED_UPGRADABLE	ALTER TABLE test.lock_waits ADD k VARCHAR(20)	root@localhost	SHARED_NO_READ_WRITE	TRANSACTION
+SELECT SLEEP(1);
+SLEEP(1)
+0
+SELECT object_schema, object_name,
+waiting_account, waiting_lock_type, waiting_query,
+blocking_account, blocking_lock_type, blocking_lock_duration
+FROM sys.schema_table_lock_waits;
+object_schema	object_name	waiting_account	waiting_lock_type	waiting_query	blocking_account	blocking_lock_type	blocking_lock_duration
+DROP TABLE test.lock_waits;

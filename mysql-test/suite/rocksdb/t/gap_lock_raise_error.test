@@ -1,0 +1,69 @@
+--source include/have_rocksdb.inc
+
+let $engine=rocksdb;
+--source include/gap_lock_raise_error_all.inc
+
+SET @save_sql_findings_control = @@GLOBAL.sql_findings_control;
+SET @@GLOBAL.sql_findings_control=on;
+
+create user 'abcd'@'%' identified by 'pw';
+grant all on t.* to 'abcd'@'%';
+drop user 'abcd'@'%';
+
+SET @save_gap_lock_exceptions = @@global.gap_lock_exceptions;
+
+SET GLOBAL gap_lock_exceptions="t.*";
+
+--let $warning_or_error=WARNING
+--source include/gap_lock_raise_error_init.inc
+
+set session autocommit=0;
+--disable_warnings
+select * from gap1 limit 1 for update;
+select * from gap1 where value != 100 limit 1 for update;
+--enable_warnings
+
+select sql_id, level, code, count, message from performance_schema.sql_findings order by sql_id, code;
+
+--source include/gap_lock_raise_error_cleanup.inc
+
+--let $warning_or_error=ERROR
+--source include/gap_lock_raise_error_init.inc
+
+set session autocommit=0;
+--error ER_UNKNOWN_ERROR
+select * from gap1 limit 1 for update;
+--error ER_UNKNOWN_ERROR
+select * from gap1 where value != 100 limit 1 for update;
+
+--source include/gap_lock_raise_error_cleanup.inc
+
+SET GLOBAL gap_lock_exceptions="gap.*";
+--let $warning_or_error=ERROR
+--source include/gap_lock_raise_error_init.inc
+
+set session autocommit=0;
+select * from gap1 limit 1 for update;
+select * from gap1 where value != 100 limit 1 for update;
+
+--source include/gap_lock_raise_error_cleanup.inc
+
+# Reset Slave All tries to acquire gap locks on system tables
+# which must succeed..
+--let $warning_or_error=ERROR
+--source include/gap_lock_raise_error_init.inc
+
+SET SESSION autocommit = 0;
+RESET REPLICA ALL;
+
+select sql_id, level, code, count, message from performance_schema.sql_findings order by sql_id, code;
+set @@GLOBAL.sql_findings_control = @save_sql_findings_control;
+
+--source include/gap_lock_raise_error_cleanup.inc
+
+# Make sure we handle invalid regex expressions and generate a warning
+--exec echo "" >$MYSQLTEST_VARDIR/log/mysqld.1.err
+SET GLOBAL gap_lock_exceptions="[a-b,abc\\";
+--exec grep -o "Invalid pattern .*$" $MYSQLTEST_VARDIR/log/mysqld.1.err | tail -n 1
+
+SET GLOBAL gap_lock_exceptions=@save_gap_lock_exceptions;

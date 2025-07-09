@@ -1,0 +1,50 @@
+--source include/have_rocksdb.inc
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+# setup search pattern and file (new log error file)
+--let SEARCH_FILE=$MYSQLTEST_VARDIR/tmp/skip_core_dump_on_error.err
+
+# restart the server with the custom error log file
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--let restart_parameters="restart: --log-error=$SEARCH_FILE --default-storage-engine=rocksdb"
+--source include/restart_mysqld.inc
+
+# setup
+create table mz(c int);
+insert into mz values(1);
+commit;
+
+# simulate a write error
+SET debug= '+d,abort_with_io_write_error';
+
+# we want to abort server if we fail to write (ABORT_SERVER)
+set global binlog_error_action=ABORT_SERVER;
+
+# check if skip_core_dump_on_error is turned on
+--let $assert_text = skip_core_dump_on_error is turned on
+--let $assert_cond = [SELECT @@global.skip_core_dump_on_error] = 1
+--source include/assert.inc
+
+--echo # crash_during_update
+# tell client that crash is expected
+--error ER_BINLOG_LOGGING_IMPOSSIBLE
+# run an update to trigger a write error
+update mz set c=13;
+
+# should find server abort (prints: Pattern "..." found)
+--echo # server aborted
+--let SEARCH_PATTERN=mysqld got signal 6
+--source include/search_pattern.inc
+
+# should not find a core dump (prints: Pattern "..." not found)
+--echo # but no core written
+--let SEARCH_PATTERN=Writing a core file
+--source include/search_pattern.inc
+
+--let restart_parameters=
+--source include/start_mysqld.inc
+--remove_file $SEARCH_FILE
+
+# tidy up
+drop table mz;

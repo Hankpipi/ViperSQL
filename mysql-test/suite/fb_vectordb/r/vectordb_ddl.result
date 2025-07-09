@@ -1,0 +1,98 @@
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 4,
+INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'flat'
+);
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint NOT NULL,
+  `vector1` json NOT NULL FB_VECTOR_DIMENSION 4,
+  PRIMARY KEY (`id`),
+  KEY `vector_key_1` (`vector1`) FB_VECTOR_INDEX_TYPE 'flat'
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT INDEX_TYPE, DIMENSION, NTOTAL, HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+INDEX_TYPE	DIMENSION	NTOTAL	HIT
+flat	4	0	0
+insert into t1 values (1, '[1,2,3,0]'), (2, '[2,22,31,0]');
+select id, fb_vector_l2(vector1, '[10, 6, 5]') as dis from t1 order by dis limit 10;
+id	dis
+1	101
+2	996
+SELECT INDEX_TYPE, DIMENSION, NTOTAL, HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+INDEX_TYPE	DIMENSION	NTOTAL	HIT
+flat	4	2	1
+drop table t1;
+SELECT INDEX_TYPE FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+INDEX_TYPE
+error case vector index column requires dimension
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON,
+INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'flat'
+);
+ERROR HY000: Incorrect arguments to fb_vector index column should have dimension set
+error case, vector index is not allowed on ttl table
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 4,
+INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'flat'
+) COMMENT "ttl_duration=3600;";
+ERROR HY000: Got error 1 - 'Operation not permitted' from storage engine
+insert into VECTORDB_DATA values ('id1', 'metadata', 0, JSON_OBJECT('version', 1, 'nlist', 1)), ('id1', 'quantizer', 0, '[0, 0, 0, 0]');
+insert into VECTORDB_DATA values ('id2', 'metadata', 0, '{"version": 2}'), ('id2', 'quantizer', 0, '[0, 0, 0, 0]');
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 4,
+INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA' FB_VECTOR_TRAINED_INDEX_ID 'id1'
+);
+SELECT INDEX_TYPE, DIMENSION, NTOTAL, HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+INDEX_TYPE	DIMENSION	NTOTAL	HIT
+ivfflat	4	0	0
+drop table t1;
+error case, ivf index require trained index table
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 4,
+INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'ivfflat'
+);
+ERROR HY000: Incorrect arguments to missing trained index options
+error case, ivf index require valid trained index table
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 4,
+INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA2' FB_VECTOR_TRAINED_INDEX_ID 'id1'
+);
+ERROR HY000: Error in command service backend interface, because of : "Table 'test.VECTORDB_DATA2' doesn't exist"
+error case, ivf index require valid trained index id
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 4,
+INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA' FB_VECTOR_TRAINED_INDEX_ID 'id100'
+);
+ERROR HY000: Got error 1 - 'Operation not permitted' from storage engine
+error case, ivf index require valid version number
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 4,
+INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA' FB_VECTOR_TRAINED_INDEX_ID 'id2'
+);
+ERROR HY000: Got error 1 - 'Operation not permitted' from storage engine
+error case, quantizer size does not match dimension
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 8,
+INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA' FB_VECTOR_TRAINED_INDEX_ID 'id1'
+);
+ERROR HY000: Got error 1 - 'Operation not permitted' from storage engine
+
+test blob column
+creating vector index blob column with error
+1. vector column should not be nullable
+CREATE TABLE t1 (id BIGINT NOT NULL PRIMARY KEY,blob1 BLOB FB_VECTOR_DIMENSION 1);
+ERROR HY000: Incorrect arguments to fb_vector column should not be nullable
+2. vector column dimension should not exceed limits
+CREATE TABLE t1 (id BIGINT NOT NULL PRIMARY KEY,blob1 BLOB NOT NULL FB_VECTOR_DIMENSION 1);
+ERROR HY000: Incorrect arguments to fb_vector_dimension out of configured bounds
+CREATE TABLE t1 (id BIGINT NOT NULL PRIMARY KEY,blob1 BLOB NOT NULL FB_VECTOR_DIMENSION 10240);
+ERROR HY000: Incorrect arguments to fb_vector_dimension out of configured bounds

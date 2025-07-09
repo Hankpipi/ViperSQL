@@ -1,0 +1,28 @@
+DESC sys.host_summary_by_statement_type;
+Field	Type	Null	Key	Default	Extra
+host	varchar(255)	X		X	
+statement	varchar(128)	X		X	
+total	bigint unsigned	X		X	
+total_latency	varchar(11)	X		X	
+max_latency	varchar(11)	X		X	
+lock_latency	varchar(11)	X		X	
+cpu_latency	varchar(11)	X		X	
+rows_sent	bigint unsigned	X		X	
+rows_examined	bigint unsigned	X		X	
+rows_affected	bigint unsigned	X		X	
+full_scans	bigint unsigned	X		X	
+SELECT * FROM sys.host_summary_by_statement_type;
+DESC sys.x$host_summary_by_statement_type;
+Field	Type	Null	Key	Default	Extra
+host	varchar(255)	X		X	
+statement	varchar(128)	X		X	
+total	bigint unsigned	X		X	
+total_latency	bigint unsigned	X		X	
+max_latency	bigint unsigned	X		X	
+lock_latency	bigint unsigned	X		X	
+cpu_latency	bigint unsigned	X		X	
+rows_sent	bigint unsigned	X		X	
+rows_examined	bigint unsigned	X		X	
+rows_affected	bigint unsigned	X		X	
+full_scans	bigint unsigned	X		X	
+SELECT * FROM sys.x$host_summary_by_statement_type;

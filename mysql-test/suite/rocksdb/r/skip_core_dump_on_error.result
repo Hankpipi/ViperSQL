@@ -1,0 +1,16 @@
+# restart: --log-error=MYSQLTEST_VARDIR/tmp/skip_core_dump_on_error.err --default-storage-engine=rocksdb
+create table mz(c int);
+insert into mz values(1);
+commit;
+SET debug= '+d,abort_with_io_write_error';
+set global binlog_error_action=ABORT_SERVER;
+include/assert.inc [skip_core_dump_on_error is turned on]
+# crash_during_update
+update mz set c=13;
+ERROR HY000: Binary logging not possible. Message: An error occurred during sync stage of the commit. 'binlog_error_action' is set to 'ABORT_SERVER'. Server is being stopped.
+# server aborted
+Pattern "mysqld got signal 6" found
+# but no core written
+Pattern "Writing a core file" not found
+# restart
+drop table mz;

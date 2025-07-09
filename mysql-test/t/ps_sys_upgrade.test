@@ -1,0 +1,22 @@
+#Performance schema upgrade/downgrade tests
+-- source include/big_test.inc
+#Memory checks will be done by ASAN builds, valgrind timeout on this test.
+--source include/not_valgrind.inc
+
+--source include/mysql_upgrade_preparation.inc
+
+--echo #
+--echo # Test case to verify upgrade/downgrade with upgrade_mode = FORCE
+--echo #
+--let upgrade_mode = FORCE
+--source include/ps_sys_upgrade.inc
+
+--echo #
+--echo # Test case to verify upgrade/downgrade with upgrade_mode = FORCE_AND_SHUTDOWN
+--echo #
+--let upgrade_mode = FORCE_AND_SHUTDOWN
+--source include/ps_sys_upgrade.inc
+
+# Restore default settings
+--let $restart_parameters = restart: --default-collation-for-utf8mb4-init="utf8mb4_general_ci"
+--source include/restart_mysqld.inc

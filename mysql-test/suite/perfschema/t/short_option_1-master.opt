@@ -1,0 +1,1 @@
+-n -Cutf8 --collation-server=utf8_bin -T12

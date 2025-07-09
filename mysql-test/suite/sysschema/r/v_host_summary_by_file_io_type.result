@@ -1,0 +1,16 @@
+DESC sys.host_summary_by_file_io_type;
+Field	Type	Null	Key	Default	Extra
+host	varchar(255)	X		X	
+event_name	varchar(128)	X		X	
+total	bigint unsigned	X		X	
+total_latency	varchar(11)	X		X	
+max_latency	varchar(11)	X		X	
+SELECT * FROM sys.host_summary_by_file_io_type;
+DESC sys.x$host_summary_by_file_io_type;
+Field	Type	Null	Key	Default	Extra
+host	varchar(255)	X		X	
+event_name	varchar(128)	X		X	
+total	bigint unsigned	X		X	
+total_latency	bigint unsigned	X		X	
+max_latency	bigint unsigned	X		X	
+SELECT * FROM sys.x$host_summary_by_file_io_type;

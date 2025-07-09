@@ -1,0 +1,12 @@
+select 'Ok, the server started' as result;
+result
+Ok, the server started
+select @@SQL_MODE;
+@@SQL_MODE
+ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+select @@character_set_server;
+@@character_set_server
+utf8mb3
+show global variables like 'character_set_system';
+Variable_name	Value
+character_set_system	utf8mb3

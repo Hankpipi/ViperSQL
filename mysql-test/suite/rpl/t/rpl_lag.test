@@ -1,0 +1,112 @@
+--echo #
+--echo # Check reset_seconds_behind_master, Relay_log_io_connected
+--echo #
+
+--source include/master-slave.inc
+
+call mtr.add_suppression("Got fatal error 1236 from master when reading data from binary log");
+
+--source include/rpl_connection_slave.inc
+--echo Should be ON
+show global variables like "reset_seconds_behind_master";
+
+set global reset_seconds_behind_master=0;
+--echo Should be OFF
+show global variables like "reset_seconds_behind_master";
+
+set global reset_seconds_behind_master=1;
+--echo Should be ON
+show global variables like "reset_seconds_behind_master";
+
+--source include/rpl_connection_master.inc
+CREATE TABLE t1 (id INT, v int);
+--source include/sync_slave_sql_with_master.inc
+
+--disable_result_log
+--let $rlic_old = `show global status like 'Relay_log_io_connected';`
+--enable_result_log
+
+let $sbm = query_get_value(SHOW SLAVE STATUS, Seconds_Behind_Master, 1);
+--echo seconds_behind_master with reset should be 0 and is $sbm
+
+set global reset_seconds_behind_master=0;
+--echo Should be OFF
+show global variables like "reset_seconds_behind_master";
+
+--source include/rpl_connection_master.inc
+insert into t1 values (1,0), (2,0);
+--sleep 2
+--source include/sync_slave_sql_with_master.inc
+
+let $sbm = query_get_value(SHOW SLAVE STATUS, Seconds_Behind_Master, 1);
+--echo seconds_behind_master without reset should be >0
+--disable_query_log
+--eval select $sbm > 0 as result
+--enable_query_log
+
+set global reset_seconds_behind_master=1;
+--echo Should be ON
+show global variables like "reset_seconds_behind_master";
+
+--source include/rpl_connection_master.inc
+insert into t1 values (3,0);
+--sleep 1
+--source include/sync_slave_sql_with_master.inc
+
+let $sbm = query_get_value(SHOW SLAVE STATUS, Seconds_Behind_Master, 1);
+--echo seconds_behind_master with reset should be 0 and is $sbm
+
+--source include/stop_slave.inc
+--source include/start_slave.inc
+
+--disable_result_log
+--let $rlic_new = `show global status like 'Relay_log_io_connected';`
+--enable_result_log
+--let diff = `SELECT ((substring('$rlic_new', 23)+0) - (substring('$rlic_old', 23)+0));`
+--echo Should be 1
+--echo $diff
+
+# sbm should return NULL for case where replication is failing
+# immediately after initialization
+#
+# This test first resets the secondary replication state, then
+# adds a new transaction to the primary, but purges all binary logs after
+# The secondary's I/O thread should fail to find the binlog needed.
+--source include/rpl_connection_slave.inc
+--source include/stop_slave.inc
+
+--source include/rpl_connection_master.inc
+--let $purged_binlog_file= query_get_value(SHOW MASTER STATUS, File, 1)
+flush logs;
+--let $current_binlog_file= query_get_value(SHOW MASTER STATUS, File, 1)
+--replace_result $current_binlog_file <CURRENT_BINLOG>
+eval PURGE BINARY LOGS TO '$current_binlog_file';
+
+--source include/rpl_connection_slave.inc
+reset replica all;
+set global reset_seconds_behind_master=0;
+--disable_warnings
+--replace_result $purged_binlog_file <PURGED_BINLOG> $MASTER_MYPORT <MASTER_PORT>
+eval change replication source to source_host='127.0.0.1', source_port=$MASTER_MYPORT, source_user='root', source_log_file='$purged_binlog_file', source_log_pos=0;
+--enable_warnings
+start replica;
+--sleep 2
+let $sbm = query_get_value(SHOW SLAVE STATUS, Seconds_Behind_Master, 1);
+--echo seconds_behind_master with reset should be NULL and is $sbm
+stop replica;
+--replace_result $current_binlog_file <CURRENT_BINLOG>
+eval change replication source to source_log_file='$current_binlog_file', source_log_pos=0;
+--source include/start_slave.inc
+
+--echo #
+--echo # Cleanup
+--echo #
+
+--source include/rpl_connection_master.inc
+DROP TABLE t1;
+--source include/sync_slave_sql_with_master.inc
+
+--source include/rpl_connection_slave.inc
+set global reset_seconds_behind_master=1;
+
+--source include/rpl_end.inc

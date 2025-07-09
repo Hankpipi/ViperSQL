@@ -1,0 +1,5 @@
+[mysql]
+no-defaults
+
+[mysqld.1]
+default-storage-engine=rocksdb

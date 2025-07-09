@@ -1,0 +1,124 @@
+# Basic tests for DUMP TABLE statement.
+
+use test;
+
+CREATE TABLE t1 (
+  a int not null auto_increment,
+  b int not null,
+  c int not null,
+  d varchar(2000),
+  e varchar(2000),
+  primary key (a, b, c),
+  key c_idx (c)
+);
+
+# Insert some dummy data.
+# Inflate the row sizes a bit to test the chunk sizes better.
+let $repeat = 200;
+source suite/dump_table/include/populate_table.inc;
+
+SELECT COUNT(*) INTO @numrows FROM t1;
+SELECT @numrows;
+
+let $chunk_prefix=t1dump;
+
+# Positive tests.
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+# Thread variations.
+let $dump_opts=WITH ( THREADS = 1 );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $dump_opts=WITH ( THREADS = 2 );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $dump_opts=WITH ( THREADS = 4 );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $dump_opts=WITH ( THREADS = 8 );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+# Try different chunk sizes.
+# This number does not evenly divide the number of rows intentionally.
+let $chunk_size_rows=5;
+let $num_chunks=`SELECT CEIL(@numrows/$chunk_size_rows)`;
+let $dump_opts=WITH ( THREADS = 2, CHUNK_SIZE = $chunk_size_rows ROWS );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $chunk_size_rows=50;
+let $num_chunks=`SELECT CEIL(@numrows/$chunk_size_rows)`;
+let $dump_opts=WITH ( THREADS = 2, CHUNK_SIZE = $chunk_size_rows ROWS );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+# Try a chunk size bigger than the table itself. Expect 1 chunk.
+let $chunk_size_rows=2000;
+let $num_chunks=`SELECT CEIL(@numrows/$chunk_size_rows)`;
+let $dump_opts=WITH ( THREADS = 2, CHUNK_SIZE = $chunk_size_rows ROWS );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+# Non-row chunk units.
+
+let $dump_opts=WITH ( THREADS = 2, CHUNK_SIZE = 4 KB );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $dump_opts=WITH ( THREADS = 2, CHUNK_SIZE = 7 KB );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $dump_opts=WITH ( THREADS = 3, CHUNK_SIZE = 101 KB );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $dump_opts=WITH ( THREADS = 2, CHUNK_SIZE = 1 MB );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $dump_opts=WITH ( THREADS = 8, CHUNK_SIZE = 4 MB );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $dump_opts=WITH ( THREADS = 4, CHUNK_SIZE = 1 GB );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+let $dump_opts=WITH ( THREADS = 16, CHUNK_SIZE = 2 GB );
+source suite/dump_table/include/dump_stmt.inc;
+source suite/dump_table/include/load_and_verify_chunks.inc;
+
+# Negative tests
+--error ER_PARSE_ERROR
+eval DUMP TABLE t1 INTO '$chunk_prefix' WITH ( THREADS = -10 );
+--error ER_PARSE_ERROR
+eval DUMP TABLE t1 INTO '$chunk_prefix' WITH ( THREADS = 'abc' );
+--error ER_WRONG_ARGUMENTS
+eval DUMP TABLE t1 INTO '$chunk_prefix' WITH ( THREADS = 0 );
+--error ER_WRONG_ARGUMENTS
+eval DUMP TABLE t1 INTO '$chunk_prefix' WITH ( CHUNK_SIZE = 0 KB );
+--error ER_PARSE_ERROR
+eval DUMP TABLE t1 INTO '$chunk_prefix' WITH ( CHUNK_SIZE = -1 KB );
+--error ER_WRONG_ARGUMENTS
+eval DUMP TABLE t1 INTO '$chunk_prefix' WITH ( CHUNK_SIZE = 0 ROWS );
+--error ER_PARSE_ERROR
+eval DUMP TABLE t1 INTO '$chunk_prefix' WITH ( CHUNK_SIZE = 1 TB );
+
+--echo Test PK requirement
+CREATE TABLE t2_nopk (
+  a int not null,
+  b int not null
+);
+
+--error ER_REQUIRES_PRIMARY_KEY
+eval DUMP TABLE t2_nopk INTO '$chunk_prefix';
+
+# Cleanup
+DROP TABLE t2_nopk;
+DROP TABLE t1;

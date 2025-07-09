@@ -1,0 +1,75 @@
+include/master-slave.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the master info repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START SLAVE; see the 'START SLAVE Syntax' in the MySQL Manual for more information.
+[connection master]
+insert into VECTORDB_DATA values ('id1', 'metadata', 0, JSON_OBJECT('version', 1, 'nlist', 2)), ('id1', 'quantizer', 0, '[0, 0, 0, 0]'), ('id1', 'quantizer', 1, '[1, 1, 0, 0]');
+include/sync_slave_sql_with_master.inc
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 4,
+name varchar(64),
+INDEX key1(vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA' FB_VECTOR_TRAINED_INDEX_ID 'id1'
+);
+insert into t1 (WITH RECURSIVE a(i) AS (SELECT 0 union all select i+1 from a where i < 99) SELECT i, json_array(i*0.0001, i*0.0001, 0, 0), concat('val', i) from a);
+insert into t1 (WITH RECURSIVE a(i) AS (SELECT 0 union all select i+1 from a where i < 99) SELECT i+1000, json_array(1+i*0.0001, 1-i*0.0001, 0, 0), concat('val', i+1000) from a);
+include/sync_slave_sql_with_master.inc
+
+verify data replication
+select *, fb_vector_l2(vector1, '[0.3, 0.3]')  as dis from t1 order by dis limit 10;
+id	vector1	name	dis
+99	[0.0099, 0.0099, 0, 0]	val99	0.1683
+98	[0.0098, 0.0098, 0, 0]	val98	0.1684
+97	[0.0097, 0.0097, 0, 0]	val97	0.1685
+96	[0.0096, 0.0096, 0, 0]	val96	0.1687
+95	[0.0095, 0.0095, 0, 0]	val95	0.1688
+94	[0.0094, 0.0094, 0, 0]	val94	0.1689
+93	[0.0093, 0.0093, 0, 0]	val93	0.169
+92	[0.0092, 0.0092, 0, 0]	val92	0.1691
+91	[0.0091, 0.0091, 0, 0]	val91	0.1692
+90	[0.009, 0.009, 0, 0]	val90	0.1694
+update t1 set vector1 = '[0.0097, 0.009, 0, 0]' where id = 98;
+include/sync_slave_sql_with_master.inc
+select *, fb_vector_l2(vector1, '[0.3, 0.3]')  as dis from t1 order by dis limit 10;
+id	vector1	name	dis
+99	[0.0099, 0.0099, 0, 0]	val99	0.1683
+97	[0.0097, 0.0097, 0, 0]	val97	0.1685
+96	[0.0096, 0.0096, 0, 0]	val96	0.1687
+95	[0.0095, 0.0095, 0, 0]	val95	0.1688
+94	[0.0094, 0.0094, 0, 0]	val94	0.1689
+98	[0.0097, 0.009, 0, 0]	val98	0.169
+93	[0.0093, 0.0093, 0, 0]	val93	0.169
+92	[0.0092, 0.0092, 0, 0]	val92	0.1691
+91	[0.0091, 0.0091, 0, 0]	val91	0.1692
+90	[0.009, 0.009, 0, 0]	val90	0.1694
+
+shutdown the replica
+include/rpl_stop_server.inc [server_number=2]
+
+delete from t1 where id = 99;
+update t1 set vector1 = '[0.00955, 0.00956, 0, 0]', name = 'newVal' where id = 94;
+
+start replica
+include/rpl_start_server.inc [server_number=2]
+START REPLICA;
+include/wait_for_slave_to_start.inc
+include/sync_slave_sql_with_master.inc
+
+verify the events written when replica was down are replicated
+select *, fb_vector_l2(vector1, '[0.3, 0.3]')  as dis from t1 order by dis limit 10;
+id	vector1	name	dis
+97	[0.0097, 0.0097, 0, 0]	val97	0.1685
+96	[0.0096, 0.0096, 0, 0]	val96	0.1687
+94	[0.0095, 0.0096, 0, 0]	newVal	0.1687
+95	[0.0095, 0.0095, 0, 0]	val95	0.1688
+98	[0.0097, 0.009, 0, 0]	val98	0.169
+93	[0.0093, 0.0093, 0, 0]	val93	0.169
+92	[0.0092, 0.0092, 0, 0]	val92	0.1691
+91	[0.0091, 0.0091, 0, 0]	val91	0.1692
+90	[0.009, 0.009, 0, 0]	val90	0.1694
+89	[0.0089, 0.0089, 0, 0]	val89	0.1695
+
+clean up
+drop table t1;
+include/sync_slave_sql_with_master.inc
+include/rpl_end.inc

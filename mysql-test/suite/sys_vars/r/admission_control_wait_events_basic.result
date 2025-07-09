@@ -1,0 +1,34 @@
+set @@global.admission_control_wait_events = default;
+select @@global.admission_control_wait_events;
+@@global.admission_control_wait_events
+
+set @saved_admission_control_wait_events = @@global.admission_control_wait_events;
+SELECT @@global.admission_control_wait_events;
+@@global.admission_control_wait_events
+
+SET GLOBAL admission_control_wait_events='';
+SELECT @@global.admission_control_wait_events;
+@@global.admission_control_wait_events
+
+SET GLOBAL admission_control_wait_events='';
+SELECT @@global.admission_control_wait_events;
+@@global.admission_control_wait_events
+
+SET GLOBAL admission_control_wait_events='YIELD';
+SELECT @@global.admission_control_wait_events;
+@@global.admission_control_wait_events
+YIELD
+SET GLOBAL admission_control_wait_events='SLEEP,ROW_LOCK,META_DATA_LOCK,INNODB_CONC,NET_IO,YIELD,COMMIT';
+SELECT @@global.admission_control_wait_events;
+@@global.admission_control_wait_events
+SLEEP,ROW_LOCK,META_DATA_LOCK,INNODB_CONC,NET_IO,YIELD,COMMIT
+SET GLOBAL admission_control_wait_events='SLEEP,SLEEP';
+SELECT @@global.admission_control_wait_events;
+@@global.admission_control_wait_events
+SLEEP
+SET GLOBAL admission_control_wait_events='YIELD,NONEXISTING_BIT';
+ERROR 42000: Variable 'admission_control_wait_events' can't be set to the value of 'NONEXISTING_BIT'
+SELECT @@global.admission_control_wait_events;
+@@global.admission_control_wait_events
+SLEEP
+set global admission_control_wait_events = @saved_admission_control_wait_events;

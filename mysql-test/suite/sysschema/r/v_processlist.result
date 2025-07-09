@@ -1,0 +1,66 @@
+DESC sys.processlist;
+Field	Type	Null	Key	Default	Extra
+thd_id	bigint unsigned	X		X	
+conn_id	bigint unsigned	X		X	
+user	varchar(336)	X		X	
+db	varchar(64)	X		X	
+command	varchar(16)	X		X	
+state	varchar(64)	X		X	
+time	bigint	X		X	
+current_statement	longtext	X		X	
+execution_engine	enum('PRIMARY','SECONDARY')	X		X	
+statement_latency	varchar(11)	X		X	
+progress	decimal(26,2)	X		X	
+lock_latency	varchar(11)	X		X	
+cpu_latency	varchar(11)	X		X	
+rows_examined	bigint unsigned	X		X	
+rows_sent	bigint unsigned	X		X	
+rows_affected	bigint unsigned	X		X	
+tmp_tables	bigint unsigned	X		X	
+tmp_disk_tables	bigint unsigned	X		X	
+full_scan	varchar(3)	X		X	
+last_statement	longtext	X		X	
+last_statement_latency	varchar(11)	X		X	
+current_memory	varchar(11)	X		X	
+last_wait	varchar(128)	X		X	
+last_wait_latency	varchar(13)	X		X	
+source	varchar(64)	X		X	
+trx_latency	varchar(11)	X		X	
+trx_state	enum('ACTIVE','COMMITTED','ROLLED BACK')	X		X	
+trx_autocommit	enum('YES','NO')	X		X	
+pid	varchar(1024)	X		X	
+program_name	varchar(1024)	X		X	
+SELECT * FROM sys.processlist;
+DESC sys.x$processlist;
+Field	Type	Null	Key	Default	Extra
+thd_id	bigint unsigned	X		X	
+conn_id	bigint unsigned	X		X	
+user	varchar(336)	X		X	
+db	varchar(64)	X		X	
+command	varchar(16)	X		X	
+state	varchar(64)	X		X	
+time	bigint	X		X	
+current_statement	longtext	X		X	
+execution_engine	enum('PRIMARY','SECONDARY')	X		X	
+statement_latency	bigint unsigned	X		X	
+progress	decimal(26,2)	X		X	
+lock_latency	bigint unsigned	X		X	
+cpu_latency	bigint unsigned	X		X	
+rows_examined	bigint unsigned	X		X	
+rows_sent	bigint unsigned	X		X	
+rows_affected	bigint unsigned	X		X	
+tmp_tables	bigint unsigned	X		X	
+tmp_disk_tables	bigint unsigned	X		X	
+full_scan	varchar(3)	X		X	
+last_statement	longtext	X		X	
+last_statement_latency	bigint unsigned	X		X	
+current_memory	decimal(41,0)	X		X	
+last_wait	varchar(128)	X		X	
+last_wait_latency	varchar(20)	X		X	
+source	varchar(64)	X		X	
+trx_latency	bigint unsigned	X		X	
+trx_state	enum('ACTIVE','COMMITTED','ROLLED BACK')	X		X	
+trx_autocommit	enum('YES','NO')	X		X	
+pid	varchar(1024)	X		X	
+program_name	varchar(1024)	X		X	
+SELECT * FROM sys.x$processlist;

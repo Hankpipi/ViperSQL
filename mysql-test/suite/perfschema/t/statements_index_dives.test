@@ -1,0 +1,6 @@
+SET @start_global_value = @@global.enable_optimizer_cputime_with_wallclock;
+SET GLOBAL enable_optimizer_cputime_with_wallclock=0;
+--source ../include/statements_index_dives_test.inc
+SET GLOBAL enable_optimizer_cputime_with_wallclock=1;
+--source ../include/statements_index_dives_test.inc
+SET GLOBAL enable_optimizer_cputime_with_wallclock = @start_global_value;

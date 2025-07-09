@@ -1,0 +1,83 @@
+CREATE TABLE t1 (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  color varchar(20) not null,
+  vector1 JSON NOT NULL fb_vector_dimension 3,
+  INDEX vector_key_1(vector1)
+  FB_VECTOR_INDEX_TYPE 'flat'
+);
+
+disable_query_log;
+# insert id 1, 4, 7 ... 31
+insert into t1 (WITH RECURSIVE a(i) AS (SELECT 1 union all select i+1 from a where i < 10) SELECT 3*i-2, 'red', json_array(i, i+1.1, i+1.2) from a);
+# insert id 2, 5, 8 ... 32
+insert into t1 (WITH RECURSIVE a(i) AS (SELECT 1 union all select i+1 from a where i < 10) SELECT 3*i-1, 'green', json_array(i*1.1, (i+1.1)*1.1, (i+1.2)*1.1) from a);
+# insert id 3, 6, 9 ... 33
+insert into t1 (WITH RECURSIVE a(i) AS (SELECT 1 union all select i+1 from a where i < 10) SELECT 3*i, 'blue', json_array(i*1.2, (i+1.1)*1.2, (i+1.2)*1.2) from a);
+enable_query_log;
+
+--disable_warnings
+
+--echo
+--echo Vector distance ordering for reference:
+explain
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 order by dis limit 100;
+--replace_numeric_round 4
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 order by dis limit 100;
+--echo
+
+select @@local.fb_vector_search_limit_multiplier;
+# for the following tests, KNN vector index access type is needed
+set session fb_vector_search_type = KNN;
+
+let $i = 1;
+
+
+while ($i < 5) {
+
+--echo
+--echo Executing queries with fb_vector_search_limit_multiplier = $i as a SESSION VAR
+eval set fb_vector_search_limit_multiplier = $i;
+--echo
+
+explain
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where color = 'green' order by dis limit 5;
+--replace_numeric_round 4
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where color = 'green' order by dis limit 5;
+
+inc $i;
+
+}
+
+--echo
+--echo with having clause
+explain
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where color IN ('red') having dis < 50 order by dis limit 6;
+--replace_numeric_round 4
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where color IN ('red') having dis < 50 order by dis limit 6;
+
+--echo
+explain
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where color IN ('red') having dis > 10 and dis < 100 order by dis limit 6;
+--replace_numeric_round 4
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where color IN ('red') having dis > 10 and dis < 100 order by dis limit 6;
+
+--enable_warnings
+
+set fb_vector_search_limit_multiplier = 1;
+
+let $i=1;
+
+while ($i < 5) {
+
+--echo
+--echo Executing queries with fb_vector_search_limit_multiplier = $i as a HINT
+--echo
+
+--replace_numeric_round 4
+eval select /*+ SET_VAR(fb_vector_search_limit_multiplier = $i) */ *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where color = 'green' order by dis limit 5;
+
+inc $i;
+
+}
+
+drop table t1;

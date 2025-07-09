@@ -1,0 +1,4 @@
+--source include/have_debug_sync.inc
+--source include/big_test.inc
+
+--source ../../auth_sec/include/acl_tables_row_locking_test.inc

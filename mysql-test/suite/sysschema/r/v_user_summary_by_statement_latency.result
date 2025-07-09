@@ -1,0 +1,26 @@
+DESC sys.user_summary_by_statement_latency;
+Field	Type	Null	Key	Default	Extra
+user	varchar(80)	X		X	
+total	decimal(42,0)	X		X	
+total_latency	varchar(11)	X		X	
+max_latency	varchar(11)	X		X	
+lock_latency	varchar(11)	X		X	
+cpu_latency	varchar(11)	X		X	
+rows_sent	decimal(42,0)	X		X	
+rows_examined	decimal(42,0)	X		X	
+rows_affected	decimal(42,0)	X		X	
+full_scans	decimal(43,0)	X		X	
+SELECT * FROM sys.user_summary_by_statement_latency;
+DESC sys.x$user_summary_by_statement_latency;
+Field	Type	Null	Key	Default	Extra
+user	varchar(80)	X		X	
+total	decimal(42,0)	X		X	
+total_latency	decimal(42,0)	X		X	
+max_latency	decimal(42,0)	X		X	
+lock_latency	decimal(42,0)	X		X	
+cpu_latency	decimal(42,0)	X		X	
+rows_sent	decimal(42,0)	X		X	
+rows_examined	decimal(42,0)	X		X	
+rows_affected	decimal(42,0)	X		X	
+full_scans	decimal(43,0)	X		X	
+SELECT * FROM sys.x$user_summary_by_statement_latency;

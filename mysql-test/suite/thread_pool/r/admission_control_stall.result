@@ -1,0 +1,32 @@
+set global thread_pool_log_level = 1000;
+create database test_db;
+create user test_user@localhost identified with 'mysql_native_password' BY '';
+grant all on test_db.* to test_user@localhost;
+Disable yielding between queries in a batch.
+TODO: DROP DATABASE is currently known to stall.
+drop database if exists test_db;
+create database test_db;
+use test_db;
+Yield every 0 queries in a batch. (0 turns it off.)
+set global thread_pool_admission_control_admission_yield_freq = 0;
+Run main workload.
+Yield every query in a batch.
+TODO: DROP DATABASE is currently known to stall.
+drop database if exists test_db;
+create database test_db;
+use test_db;
+Yield every 1 queries in a batch. (0 turns it off.)
+set global thread_pool_admission_control_admission_yield_freq = 1;
+Run main workload.
+Yield every 5 queries in a batch.
+TODO: DROP DATABASE is currently known to stall.
+drop database if exists test_db;
+create database test_db;
+use test_db;
+Yield every 5 queries in a batch. (0 turns it off.)
+set global thread_pool_admission_control_admission_yield_freq = 5;
+Run main workload.
+drop database test_db;
+drop user test_user@localhost;
+set global thread_pool_log_level = default;
+set global thread_pool_admission_control_admission_yield_freq = default;

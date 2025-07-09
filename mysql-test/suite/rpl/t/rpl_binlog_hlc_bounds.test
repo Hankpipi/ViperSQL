@@ -1,0 +1,567 @@
+--let $rpl_server_count= 1
+--let $rpl_topology= none
+--source include/rpl_init.inc
+--source include/have_binlog_format_row.inc
+--source include/have_debug.inc
+--source include/not_parallel.inc
+
+# Cleanup old binlog
+connection default;
+flush logs;
+let $binlog= query_get_value(SHOW MASTER STATUS, File, 1);
+replace_result $binlog binlog;
+eval purge binary logs to '$binlog';
+
+# Set minimum_hlc_ns to a high value. Subsequent txn's should see monotonically
+# increasing timestamp from this point
+SET SESSION DEBUG="+d,allow_long_hlc_drift_for_tests";
+SET @@global.minimum_hlc_ns = 2538630000000000000; # ~2050 AD
+SET @@global.maximum_hlc_drift_ns = 2538630000000000000;
+
+# Enable binlog_hlc
+SET @@session.response_attrs_contain_hlc = true;
+SET @@session.enable_hlc_bound = true;
+SET @@global.enable_binlog_hlc = true;
+SET @@global.maintain_database_hlc = true;
+SET @@global.wait_for_hlc_timeout_ms = 100;
+
+CREATE DATABASE a;
+USE a;
+CREATE TABLE ta (a INT PRIMARY KEY, b CHAR(8)) ENGINE=InnoDB;
+INSERT INTO ta (a, b) VALUES (1, 'foo');
+
+# =============================================================================
+# Specifying low HLC bound for transactional queries should advance HLC
+# to the requested boundary
+# =============================================================================
+
+--let $half_sec_hlc = 500000000
+--let $one_sec_hlc = 1000000000
+--let $two_sec_hlc = 2000000000
+--let $next_hlc = 2538630004000000000
+--let $next_key = 16
+
+--echo Low HLC bounds in transactions
+
+# Perform a transactional write with lower HLC bound specified
+# Advance HLC by 4 sec for the next operation
+--let $hlc = $next_hlc
+USE a;
+BEGIN;
+query_attrs_add hlc_ts_lower_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bar');
+query_attrs_reset;
+COMMIT;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was updated by the INSERT
+--let $assert_cond = $hlc >= $next_hlc
+--source include/assert.inc
+--inc $next_key
+--let $next_hlc = `SELECT $next_hlc + $one_sec_hlc`
+
+--echo Low HLC bound set on BEGIN
+
+# Perform a transactional write with lower HLC bound specified
+# Advance HLC by 1 more sec for the next operation
+--let $hlc = $next_hlc
+USE a;
+query_attrs_add hlc_ts_lower_bound $hlc;
+BEGIN;
+query_attrs_reset;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bar');
+COMMIT;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was updated by the BEGIN
+--let $assert_cond = $hlc >= $next_hlc
+--source include/assert.inc
+--inc $next_key
+--let $next_hlc = `SELECT $next_hlc + $one_sec_hlc`
+
+--echo Low HLC bound set on COMMIT
+
+# Perform a transactional write with lower HLC bound specified
+--let $hlc = $next_hlc
+USE a;
+BEGIN;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bar');
+query_attrs_add hlc_ts_lower_bound $hlc;
+COMMIT;
+query_attrs_reset;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was updated by the INSERT
+--let $assert_cond = $hlc >= $next_hlc
+--source include/assert.inc
+--inc $next_key
+--let $next_hlc = `SELECT $next_hlc + $one_sec_hlc`
+
+--echo Setting Low HLC bounds on BEGIN, query and COMMIT
+
+# Perform a transactional write with lower HLC bound specified
+USE a;
+--let $hlc = $next_hlc
+query_attrs_add hlc_ts_lower_bound $hlc;
+BEGIN;
+query_attrs_reset;
+--let $hlc = `SELECT $next_hlc - $half_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bar');
+query_attrs_reset;
+--let $hlc = `SELECT $next_hlc - $one_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+COMMIT;
+query_attrs_reset;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was updated by the INSERT
+--let $assert_cond = $hlc >= $next_hlc
+--source include/assert.inc
+--inc $next_key
+--let $next_hlc = `SELECT $next_hlc + $one_sec_hlc`
+
+--echo Setting Low HLC bounds on SELECT inside a transaction
+
+--let $hlc = $next_hlc
+USE a;
+BEGIN;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bar');
+query_attrs_add hlc_ts_lower_bound $hlc;
+eval SELECT b FROM ta WHERE a = $next_key;
+query_attrs_reset;
+COMMIT;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was updated by the SELECT
+--let $assert_cond = $hlc >= $next_hlc
+--source include/assert.inc
+--inc $next_key
+--let $next_hlc = `SELECT $next_hlc + $one_sec_hlc`
+
+--echo Setting Low HLC bounds on a SELECT before transaction start
+
+--let $hlc = $next_hlc
+USE a;
+query_attrs_add hlc_ts_lower_bound $hlc;
+--let $key = `SELECT $next_key - 1`
+eval SELECT b FROM ta WHERE a = $key;
+query_attrs_reset;
+BEGIN;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bqr');
+COMMIT;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was not updated by the transaction after SELECT
+--let $assert_cond = $hlc < $next_hlc
+--source include/assert.inc
+--inc $next_key
+
+--echo Testing max drift limit
+
+# Set the limit to 1 sec
+eval SET @@global.maximum_hlc_drift_ns = $one_sec_hlc;
+--disable_result_log
+USE a;
+BEGIN;
+--let $hlc = `SELECT $next_hlc + $two_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bir');
+query_attrs_reset;
+--error ER_HLC_ABOVE_MAX_DRIFT
+COMMIT;
+--enable_result_log
+SET @@global.maximum_hlc_drift_ns = 2538630000000000000;
+
+--echo ROLLBACK should clear lower bounds for subsequent operations
+
+# Start a transaction then roll it back without committing
+USE a;
+BEGIN;
+--let $hlc = 2538630000000000000
+query_attrs_add hlc_ts_lower_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bqr');
+query_attrs_reset;
+ROLLBACK;
+# Following transaction must not inherit any bounds
+USE a;
+BEGIN;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bqr');
+COMMIT;
+--inc $next_key
+
+# Start another transaction then roll it back without committing
+USE a;
+BEGIN;
+--let $hlc = 2538630000000000000
+query_attrs_add hlc_ts_lower_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'byp');
+query_attrs_reset;
+ROLLBACK;
+# Following operation must not inherit any bounds
+USE a;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'byp');
+--inc $next_key
+
+--echo Setting lower bound HLC for inserts outside of transactions
+
+--echo INSERT with lower HLC bound from the past
+--let $hlc = `SELECT $next_hlc - $two_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+USE a;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bir');
+let $hlc = get_response_attribute(hlc_ts);
+query_attrs_reset;
+
+--let $assert_text = Check if HLC was not updated by the INSERT
+--let $assert_cond = $hlc >= $next_hlc - $one_sec_hlc
+--source include/assert.inc
+
+--let $assert_text = Check if HLC was not updated by the previous insert since it failed
+--let $assert_cond = $hlc < $next_hlc + $two_sec_hlc
+--source include/assert.inc
+--inc $next_key
+
+--echo INSERT with lower HLC bound a little bit ahead
+
+USE a;
+--let $hlc = $next_hlc
+query_attrs_add hlc_ts_lower_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bur');
+query_attrs_reset;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was updated by the INSERT
+--let $assert_cond = $hlc >= $next_hlc
+--source include/assert.inc
+--inc $next_key
+--let $next_hlc = `SELECT $next_hlc + $one_sec_hlc`
+
+--echo INSERT with lower HLC bound far ahead
+
+eval SET @@global.maximum_hlc_drift_ns = $one_sec_hlc;
+--let $hlc = `SELECT $next_hlc + $two_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+--disable_result_log
+USE a;
+--error ER_HLC_ABOVE_MAX_DRIFT
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'byr');
+--enable_result_log
+query_attrs_reset;
+
+--echo Perform a single write to get an HLC timstamp from the write
+
+USE a;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bam');
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was not updated by the last INSERT since it failed
+--let $assert_cond = $hlc < $next_hlc + $two_sec_hlc
+--source include/assert.inc
+--inc $next_key
+
+--echo Perform write with lower HLC bound below the current HLC
+
+SET @@global.maximum_hlc_drift_ns = 2538630000000000000;
+
+--let $hlc = 2538630000000000000
+query_attrs_add hlc_ts_lower_bound $hlc;
+USE a;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bup');
+let $hlc = get_response_attribute(hlc_ts);
+# HLC shouldn't drop down to 2538630000000000000
+--let $assert_text = Check if HLC hasn't decrease after INSERT
+--let $assert_cond = $hlc >= $next_hlc - $one_sec_hlc
+--source include/assert.inc
+--inc $next_key
+query_attrs_reset;
+
+--echo Lower HLC bound from previous queries must not affect subsequent queries
+
+eval SET @@global.maximum_hlc_drift_ns = $one_sec_hlc;
+--let $hlc = `SELECT $next_hlc + $two_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+--disable_result_log
+USE a;
+--error ER_HLC_ABOVE_MAX_DRIFT
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'buh');
+query_attrs_reset;
+--enable_result_log
+# Run another query which has no lower HLC boundary set
+# The query is expected to succeesd
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'buh');
+--inc $next_key
+SET @@global.maximum_hlc_drift_ns = 2538630000000000000;
+
+# =============================================================================
+# Specifying upper HLC bound for transactional queries should fail queries
+# if HLC passed over the requested upper bound
+# =============================================================================
+
+--echo A valid upper HLC bounds in transactions
+
+USE a;
+BEGIN;
+--let $hlc = $next_hlc
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bep');
+query_attrs_reset;
+COMMIT;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was not updated by the last INSERT
+--let $assert_cond = $hlc <= $next_hlc
+--source include/assert.inc
+--inc $next_key
+
+--echo A valid upper HLC bound set on COMMIT query
+
+USE a;
+BEGIN;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bep');
+--let $hlc = $next_hlc
+query_attrs_add hlc_ts_upper_bound $hlc;
+COMMIT;
+query_attrs_reset;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was not updated by the last INSERT
+--let $assert_cond = $hlc <= $next_hlc
+--source include/assert.inc
+--inc $next_key
+
+--echo Stale upper HLC bound on BEGIN 
+
+--disable_result_log
+USE a;
+--let $hlc = 2538630000000000000
+query_attrs_add hlc_ts_upper_bound $hlc;
+BEGIN;
+query_attrs_reset;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bem');
+--error ER_HLC_STALE_UPPER_BOUND
+COMMIT;
+--enable_result_log
+
+--echo Stale upper HLC bounds in transactions
+
+--disable_result_log
+USE a;
+BEGIN;
+--let $hlc = 2538630000000000000
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bem');
+query_attrs_reset;
+--error ER_HLC_STALE_UPPER_BOUND
+COMMIT;
+--enable_result_log
+
+--echo Stale upper HLC bound on SELECT in transactions
+
+--disable_result_log
+USE a;
+BEGIN;
+--let $hlc = 2538630000000000000
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bem');
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval SELECT b FROM ta WHERE a = $next_key;
+query_attrs_reset;
+--error ER_HLC_STALE_UPPER_BOUND
+COMMIT;
+--enable_result_log
+
+--echo Stale upper HLC bound on SELECT before transaction start
+
+USE a;
+--let $hlc = 2538630000000000000
+query_attrs_add hlc_ts_upper_bound $hlc;
+--let $key = `SELECT $next_key - 1`
+eval SELECT b FROM ta WHERE a = $key;
+query_attrs_reset;
+BEGIN;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bem');
+eval SELECT b FROM ta WHERE a = $next_key;
+COMMIT;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was not updated by the transaction
+--let $assert_cond = $hlc > 2538630000000000000
+--source include/assert.inc
+--inc $next_key
+
+--echo Set upper HLC bound on both INSERT and COMMIT queries
+
+# Setting very low Upper HLC Bound on Insert query and
+# high Upper HLC bound on COMMIT query is expected to cause
+# COMMIT to fail because the lowest Upper HLC Bound should be
+# applied.
+--disable_result_log
+USE a;
+BEGIN;
+--let $hlc = 2538630000000000000
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bwp');
+query_attrs_reset;
+--let $hlc = $next_hlc
+query_attrs_add hlc_ts_upper_bound $hlc;
+--error ER_HLC_STALE_UPPER_BOUND
+COMMIT;
+--enable_result_log
+query_attrs_reset;
+
+--echo ROLLBACK should clear upper bounds for subsequent operations
+
+# Start a transaction with low upper bound, then roll it back
+USE a;
+BEGIN;
+--let $hlc = 2538630000000000000
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bws');
+query_attrs_reset;
+ROLLBACK;
+# Try a transaction with no bounds set - it must succeed
+USE a;
+BEGIN;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bws');
+ROLLBACK;
+--inc $next_key
+
+# Start a transaction with low upper bound, then roll it back
+USE a;
+BEGIN;
+--let $hlc = 2538630000000000000
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bwt');
+query_attrs_reset;
+ROLLBACK;
+# Try an operation with no bounds set - it must succeed
+USE a;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bwt');
+--inc $next_key
+
+--echo Setting non-zero HLC Upper Bound delta
+
+SET @@global.hlc_upper_bound_delta = 1;  # 1ns
+
+USE a;
+BEGIN;
+--let $hlc = $next_hlc
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bem');
+query_attrs_reset;
+COMMIT;
+let $hlc = get_response_attribute(hlc_ts);
+--let $assert_text = Check if HLC was not updated by the last INSERT
+--let $assert_cond = $hlc <= $next_hlc
+--source include/assert.inc
+--inc $next_key
+
+--echo Setting non-zero HLC Upper Bound delta that blocks the transaction
+
+SET @@global.hlc_upper_bound_delta = 100000000000;
+
+--disable_result_log
+USE a;
+BEGIN;
+--let $hlc = $next_hlc
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bed');
+query_attrs_reset;
+--error ER_HLC_STALE_UPPER_BOUND
+COMMIT;
+--enable_result_log
+
+-- echo Upper HLC bound set to 0 shouldn't be treated differently
+
+USE a;
+BEGIN;
+--let $hlc = 0
+query_attrs_add hlc_ts_upper_bound $hlc;
+--disable_result_log
+--error ER_INVALID_HLC
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bqd');
+query_attrs_reset;
+COMMIT;
+--enable_result_log
+
+--echo Setting both HLC upper and lower bounds
+
+SET @@global.hlc_upper_bound_delta = 10000000000;
+
+# Setting both upper and lower HLC bound. Upper bound is initially clear,
+# but once lower bound advances current HLC upper bound gets stale
+# considering the set delta. The quesry is expected to fail.
+--disable_result_log
+USE a;
+BEGIN;
+--let $hlc = $next_hlc
+query_attrs_add hlc_ts_lower_bound $hlc;
+--let $hlc = `SELECT $next_hlc + $half_sec_hlc`
+query_attrs_add hlc_ts_upper_bound $hlc;
+--error ER_HLC_STALE_UPPER_BOUND
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bed');
+query_attrs_reset;
+COMMIT;
+--enable_result_log
+
+--echo Setting different upper and lower boundaries for queries in a transaction
+
+SET @@global.hlc_upper_bound_delta = 0;
+
+# Setting different sets of upper and lower bounds on multiple
+# queries in a transaction
+USE a;
+
+--let $hlc = `SELECT $next_hlc - $two_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+--let $hlc = `SELECT $next_hlc + $two_sec_hlc + $half_sec_hlc`
+query_attrs_add hlc_ts_upper_bound $hlc;
+BEGIN;
+query_attrs_reset;
+
+--let $hlc = `SELECT $next_hlc - $one_sec_hlc - $half_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+--let $hlc = `SELECT $next_hlc + $two_sec_hlc`
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval INSERT INTO ta (a, b) VALUES ($next_key, 'bed');
+query_attrs_reset;
+
+--let $hlc = `SELECT $next_hlc - $one_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+--let $hlc = `SELECT $next_hlc + $one_sec_hlc + $half_sec_hlc`
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval UPDATE ta SET b='bup' WHERE a=$next_key;
+query_attrs_reset;
+
+--let $hlc = `SELECT $next_hlc - $half_sec_hlc`
+query_attrs_add hlc_ts_lower_bound $hlc;
+--let $hlc = `SELECT $next_hlc + $one_sec_hlc`
+query_attrs_add hlc_ts_upper_bound $hlc;
+eval DELETE FROM ta WHERE a=$next_key;
+query_attrs_reset;
+
+--let $hlc = $next_hlc
+query_attrs_add hlc_ts_lower_bound $hlc;
+--let $hlc = `SELECT $next_hlc + $half_sec_hlc`
+query_attrs_add hlc_ts_upper_bound $hlc;
+COMMIT;
+query_attrs_reset;
+
+let $hlc = get_response_attribute(hlc_ts);
+
+--let $assert_text = Check if lower HLC bound condition was satisfied
+--let $assert_cond = $hlc >= $next_hlc
+--source include/assert.inc
+
+--let $assert_text = Check if upper HLC bound condition was satisfied
+--let $assert_cond = $hlc < $next_hlc + $one_sec_hlc
+--source include/assert.inc
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
+--echo Cleanup
+
+DROP DATABASE a;
+
+SET @@global.enable_binlog_hlc = default;
+SET @@global.maintain_database_hlc = default;
+SET @@global.wait_for_hlc_timeout_ms = default;
+SET @@global.enable_hlc_bound = default;
+SET SESSION DEBUG = "+d,reset_hlc_for_tests";
+SET @@global.minimum_hlc_ns = 0;
+SET SESSION DEBUG = "-d,reset_hlc_for_tests";
+SET @@global.maximum_hlc_drift_ns = default;
+SET @@global.hlc_upper_bound_delta = default;
+
+source include/rpl_end.inc;

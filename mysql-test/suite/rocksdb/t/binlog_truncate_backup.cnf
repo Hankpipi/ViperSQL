@@ -1,0 +1,13 @@
+!include suite/rocksdb_rpl/my.cnf
+
+[mysqld.1]
+binlog_format=row
+gtid_mode=ON
+enforce_gtid_consistency
+log_slave_updates
+
+[mysqld.2]
+binlog_format=row
+gtid_mode=ON
+enforce_gtid_consistency
+log_slave_updates

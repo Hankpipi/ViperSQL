@@ -1,0 +1,153 @@
+--source include/have_rocksdb.inc
+
+#
+# CHECKSUM TABLE statements for standard CHECKSUM properties.
+# Live checksums are covered in checksum_table_live.test
+#
+
+--disable_warnings
+DROP TABLE IF EXISTS t1,t2;
+--enable_warnings
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b CHAR(8)) ENGINE=rocksdb charset=latin1 CHECKSUM=0;
+INSERT INTO t1 (a,b) VALUES (1,'a'),(2,'b');
+
+CREATE TABLE t2 (a INT PRIMARY KEY, b CHAR(8)) ENGINE=rocksdb charset=latin1 CHECKSUM=0;
+
+CHECKSUM TABLE t1;
+CHECKSUM TABLE t2, t1;
+CHECKSUM TABLE t1, t2 QUICK;
+CHECKSUM TABLE t1, t2 EXTENDED;
+
+DROP TABLE t1, t2;
+
+--echo #
+--echo # Issue #110: SQL command checksum returns inconsistent result
+--echo #
+create table t1 (pk int primary key, col1 varchar(10)) engine=rocksdb charset=latin1;
+insert into t1 values (2,'fooo');
+insert into t1 values (1,NULL);
+checksum table t1;
+checksum table t1;
+select * from t1 where pk=2;
+checksum table t1;
+checksum table t1;
+flush tables;
+checksum table t1;
+checksum table t1;
+
+drop table t1;
+
+--echo #
+--echo #  The following test is about making sure MyRocks CHECKSUM TABLE
+--echo #  values are the same as with InnoDB.
+--echo #  If you see checksum values changed, make sure their counterparts
+--echo #  in suite/innodb/r/checksum-matches-myrocks.result match.
+--echo #
+
+create table t1 (pk int primary key, col1 varchar(10)) engine=rocksdb charset=latin1;
+insert into t1 values (2,'fooo');
+insert into t1 values (1,NULL);
+checksum table t1;
+drop table t1;
+
+create table t1 (
+  pk bigint unsigned primary key,
+  col1 varchar(10),
+  col2 tinyint,
+  col3 double
+) engine=rocksdb charset=latin1;
+
+checksum table t1;
+
+insert into t1 values (1, NULL,  NULL, NULL);
+insert into t1 values (2, 'foo', NULL, NULL);
+checksum table t1;
+checksum table t1 (pk);
+
+insert into t1 values (3, NULL,  123,  NULL);
+insert into t1 values (4, NULL,  NULL, 2.78);
+checksum table t1;
+
+insert into t1 values (5, 'xxxYYYzzzT',  NULL, 2.78);
+insert into t1 values (6, '',            NULL, 2.78);
+checksum table t1;
+let $t1_chksum = query_get_value(checksum table t1, Checksum, 1);
+
+--echo Column order should be respected: these should yield different results.
+checksum table t1 (pk, col1);
+checksum table t1 (col1, pk);
+checksum table t1 (pk, col1, col2);
+--echo Column order should be respected: these should yield different results.
+checksum table t1 (pk, col1, col2, col3);
+checksum table t1 (pk, col1, col3, col2);
+# Define variable for checksum query to workaround MTR parsing due to comma.
+let $checksum_all_cols_stmt = checksum table t1 (pk, col1, col2, col3);
+let $t1_chksum_individually = query_get_value("$checksum_all_cols_stmt", Checksum, 1);
+
+--echo Add a nullable column to t1 at the end to ensure the selective checksum
+--echo does not change. Note: the default values for col4 will be NULL.
+alter table t1 add column col4 int;
+select pk, col4 from t1;
+let $t1_chksum_individually_with_new_col = query_get_value("$checksum_all_cols_stmt", Checksum, 1);
+assert($t1_chksum_individually == $t1_chksum_individually_with_new_col);
+
+--echo Add a nullable column to t1 in the middle to ensure the selective
+--echo checksum does not change. Note: the default values for col5 will be NULL.
+alter table t1 add column col5 int after col2;
+select pk, col5 from t1;
+let $t1_chksum_individually_with_new_col_in_middle = query_get_value("$checksum_all_cols_stmt", Checksum, 1);
+assert($t1_chksum_individually == $t1_chksum_individually_with_new_col_in_middle);
+
+--echo Change a nullable column to a non-NULL value to verify that the checksum
+--echo stays the same when that column is not selected.
+update t1 set col4 = 1 where pk = 1;
+select pk, col4 from t1;
+let $t1_chksum_individually_after_null_change = query_get_value("$checksum_all_cols_stmt", Checksum, 1);
+assert($t1_chksum_individually == $t1_chksum_individually_after_null_change);
+
+--echo Add lots of nullable columns to t1 at the end to ensure that even if the
+--echo number of null bytes changes, the selective checksum still
+--echo does not change.
+alter table t1
+  add column col6 int, add column col7 int,
+  add column col8 int, add column col9 int,
+  add column col10 int;
+let $t1_chksum_individually_with_many_cols = query_get_value("$checksum_all_cols_stmt", Checksum, 1);
+assert($t1_chksum_individually == $t1_chksum_individually_with_many_cols);
+
+create table t2 (a int, b int, c int) engine=rocksdb;
+insert into t2 values (1, 0, 0);
+checksum table t2 (a, b, c);
+begin;
+update t2 set b=NULL;
+# Define variable for checksum query to workaround MTR parsing due to comma.
+let $checksum_all_cols_stmt = checksum table t2 (a, b, c);
+let $t2_chksum_b_null = query_get_value("$checksum_all_cols_stmt", Checksum, 1);
+rollback;
+begin;
+update t2 set c=NULL;
+let $t2_chksum_c_null = query_get_value("$checksum_all_cols_stmt", Checksum, 1);
+rollback;
+--echo Checksums should differ.
+assert($t2_chksum_b_null != $t2_chksum_c_null);
+drop table t2;
+
+--echo Negative tests
+--echo --------------
+--error ER_PARSE_ERROR
+checksum table t1 ();
+--echo Can't use * expression in select list.
+--error ER_PARSE_ERROR
+checksum table t1 (*);
+--echo Can't checksum multiple tables with select-list.
+--error ER_PARSE_ERROR
+checksum table t1 (col1), t2;
+--error ER_PARSE_ERROR
+checksum table t1, t2 (fake_col);
+--echo Can't use expressions in select list.
+--error ER_PARSE_ERROR
+checksum table t1 (pk + 1, col1);
+--error ER_BAD_FIELD_ERROR
+checksum table t1 (pk, z);
+drop table t1;
