@@ -1,4 +1,4 @@
-#include "sql/iterators/gpu_helpers/gpu_agg.h"
+#include "sql/iterators/helpers/gpu_agg.h"
 #include <iostream>
 
 #define CUDA_CHECK(call)                                                   \

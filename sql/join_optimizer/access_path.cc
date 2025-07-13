@@ -27,6 +27,7 @@
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
 #include "sql/item_sum.h"
+#include "sql/item_semantic_filter_func.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/bka_iterator.h"
 #include "sql/iterators/composite_iterators.h"
@@ -36,7 +37,7 @@
 #include "sql/iterators/sorting_iterator.h"
 #include "sql/iterators/timing_iterator.h"
 #include "sql/iterators/window_iterators.h"
-#include "sql/iterators/gpu_iterators.h"
+#include "sql/iterators/vectorized_iterators.h"
 #include "sql/join_optimizer/bit_utils.h"
 #include "sql/join_optimizer/cost_model.h"
 #include "sql/join_optimizer/estimate_selectivity.h"
@@ -841,8 +842,26 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         if (FinalizeMaterializedSubqueries(thd, join, path)) {
           return nullptr;
         }
-        iterator = NewIterator<FilterIterator>(
-            thd, mem_root, std::move(job.children[0]), param.condition);
+        if (Item *sem = find_semantic_filter(param.condition)) {
+          Prealloced_array<TABLE*, 4> tables =
+              GetUsedTables(param.child, /*include_pruned_tables=*/true);
+          iterator = NewIterator<VectorizedFilterIterator>(
+              thd,
+              mem_root,
+              std::move(job.children[0]),
+              TableCollection(tables, /*store_rowids=*/false,
+                            /*tables_to_get_rowid_for=*/0,
+                            GetNullableEqRefTables(param.child)),
+              sem);
+        }
+        else {
+          // fall back to the old, row‐by‐row FilterIterator
+          iterator = NewIterator<FilterIterator>(
+              thd,
+              mem_root,
+              std::move(job.children[0]),
+              param.condition);
+        }
         break;
       }
       case AccessPath::SORT: {

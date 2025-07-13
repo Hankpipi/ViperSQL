@@ -1,4 +1,4 @@
-#include "sql/iterators/gpu_helpers/gpu_hash_join.h"
+#include "sql/iterators/helpers/gpu_hash_join.h"
 
 
 namespace gpuhashjoinhelpers {

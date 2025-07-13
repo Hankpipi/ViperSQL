@@ -69,6 +69,7 @@
 #include "sql/item_sum.h"          // Item_sum_udf_str
 #include "sql/item_timefunc.h"     // Item_func_add_time
 #include "sql/item_xmlfunc.h"      // Item_func_xml_extractvalue
+#include "sql/item_semantic_filter_func.h"
 #include "sql/my_decimal.h"
 #include "sql/parse_location.h"
 #include "sql/parse_tree_helpers.h"  // PT_item_list
@@ -1802,7 +1803,12 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"FB_VECTOR_BLOB_TO_JSON",
      SQL_FN_V_LIST_THD(Item_func_fb_vector_blob_to_json, 1, 1)},
     {"FB_VECTOR_JSON_TO_BLOB",
-     SQL_FN_LIST(Item_func_fb_vector_json_to_blob, 1)}};
+     SQL_FN_LIST(Item_func_fb_vector_json_to_blob, 1)},
+    // semantic db functions
+    {"SEMANTIC_FILTER_SINGLE_COL", 
+    SQL_FN_V_LIST_THD(Item_func_semantic_filter_single_col, 2, 2)},
+    {"SEMANTIC_FILTER_TWO_COL", 
+    SQL_FN_V_LIST_THD(Item_func_semantic_filter_two_col, 3, 3)}};
 
 using Native_functions_hash = std::unordered_map<std::string, Create_func *>;
 static const Native_functions_hash *native_functions_hash;

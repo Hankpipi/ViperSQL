@@ -410,6 +410,7 @@ SET(SQL_SHARED_SOURCES
   item_json_func.cc
   item_fb_vector_func.cc
   item_regexp_func.cc
+  item_semantic_filter_func.cc
   item_row.cc
   item_strfunc.cc
   item_subselect.cc
@@ -424,10 +425,11 @@ SET(SQL_SHARED_SOURCES
   iterators/hash_join_buffer.cc
   iterators/hash_join_chunk.cc
   iterators/hash_join_iterator.cc
-  iterators/gpu_iterators.cc
+  iterators/vectorized_iterators.cc
   iterators/ref_row_iterators.cc
   iterators/sorting_iterator.cc
   iterators/window_iterators.cc
+  iterators/helpers/model_api.cc
   join_optimizer/access_path.cc
   join_optimizer/build_interesting_orders.cc
   join_optimizer/common_subexpression_elimination.cc
@@ -656,8 +658,8 @@ SET(SQL_SHARED_SOURCES
   )
 
 set(SQL_CUDA_SOURCES
-    iterators/gpu_helpers/gpu_hash_join.cc
-    iterators/gpu_helpers/gpu_agg.cc
+    iterators/helpers/gpu_hash_join.cc
+    iterators/helpers/gpu_agg.cc
     iterators/gpu_ops/hash_join.cu
     iterators/gpu_ops/aggr.cu
 )
@@ -976,6 +978,13 @@ IF (WITH_FB_VECTORDB)
   MESSAGE(STATUS "Building sql module with fb vectordb support")
   TARGET_INCLUDE_DIRECTORIES(sql_main SYSTEM PRIVATE "${FAISS_SOURCE_DIR}")
   TARGET_LINK_LIBRARIES(sql_main -lgfortran ${BLAS_LIBRARIES} ${OPENMP_LIBRARY} ${FAISS_LIBRARY})
+ENDIF()
+
+IF (WITH_SEMANTICDB)
+  MESSAGE(STATUS "Building sql module with semanticdb support")
+  FIND_PACKAGE(CURL REQUIRED)
+  TARGET_INCLUDE_DIRECTORIES(sql_main SYSTEM PRIVATE ${CURL_INCLUDE_DIRS})
+  TARGET_LINK_LIBRARIES(sql_main -lgfortran ${CURL_LIBRARIES})
 ENDIF()
 
 ADD_LIBRARY(sql_gis STATIC ${SQL_GIS_SOURCES})

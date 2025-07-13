@@ -2,8 +2,8 @@
 #define SQL_ITERATORS_GPU_ITERATORS_H_
 
 #include "sql/iterators/composite_iterators.h"
-#include "sql/iterators/gpu_helpers/gpu_agg.h"
-#include "sql/iterators/gpu_helpers/gpu_hash_join.h"
+#include "sql/iterators/helpers/gpu_agg.h"
+#include "sql/iterators/helpers/gpu_hash_join.h"
 #include "sql/iterators/external_helper_buffer.h"
 
 namespace gpu_temptable_aggregate_iterator {
@@ -100,12 +100,49 @@ class GPUHashJoinIterator : public RowIterator {
   
   size_t m_row_size;
 
-  // Store the current row from the given tables' buffers into a CPU memory buffer
-  std::vector<uint8_t> store_row_to_buffer(const pack_rows::TableCollection& tables);
-
   // Extract join key from the current row of the given tables' buffers into m_buffer
   bool extract_join_key_for_row(THD* thd, const pack_rows::TableCollection& tables);
 };
 
+
+// Store the current row from the given tables' buffers into a CPU memory buffer
+std::vector<uint8_t> store_row_to_buffer(const pack_rows::TableCollection& tables, size_t row_size);
+
+class VectorizedFilterIterator final : public RowIterator {
+ public:
+  VectorizedFilterIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
+                 pack_rows::TableCollection tables,
+                 Item *condition)
+    : RowIterator(thd),
+      m_source(std::move(source)),
+      m_tables(std::move(tables)),
+      m_condition(condition),
+      m_buffer_manager(64LL * 1024 * 1024,
+                       BATCH_SIZE,
+                       "LLMFilter") {}
+
+  bool Init() override;
+
+  int Read() override;
+
+  void SetNullRowFlag(bool is_null_row) override {
+    m_source->SetNullRowFlag(is_null_row);
+  }
+
+  void StartPSIBatchMode() override { m_source->StartPSIBatchMode(); }
+  void EndPSIBatchModeIfStarted() override {
+    m_source->EndPSIBatchModeIfStarted();
+  }
+  void UnlockRow() override { m_source->UnlockRow(); }
+
+ private:
+  unique_ptr_destroy_only<RowIterator> m_source;
+  pack_rows::TableCollection m_tables;
+  Item *m_condition;
+
+  size_t m_row_size;
+  std::queue<std::vector<uint8_t>> m_rows_queue;
+  ExternalHelperBufferManager<std::string, uint8_t> m_buffer_manager;
+};
 
 #endif

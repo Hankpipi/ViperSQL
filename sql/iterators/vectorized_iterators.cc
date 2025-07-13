@@ -1,10 +1,11 @@
-#include "sql/iterators/gpu_iterators.h"
+#include "sql/iterators/vectorized_iterators.h"
 #include "sql/sql_tmp_table.h"
 #include "sql/opt_trace.h"
 #include "sql/opt_trace_context.h"
 #include "sql/pfs_batch_mode.h"
 #include "sql/iterators/timing_iterator.h"
 #include "sql/sql_optimizer.h"
+#include "sql/item_semantic_filter_func.h"
 #include "scope_guard.h"
 
 /**
@@ -427,8 +428,8 @@ GPUHashJoinIterator::GPUHashJoinIterator(
 }
 
 // Returns extracted raw row buffer or empty vector on failure
-std::vector<uint8_t> GPUHashJoinIterator::store_row_to_buffer(const pack_rows::TableCollection& tables) {
-  size_t row_size_upper_bound = m_row_size;
+std::vector<uint8_t> store_row_to_buffer(const pack_rows::TableCollection& tables, size_t row_size) {
+  size_t row_size_upper_bound = row_size;
   if (tables.has_blob_column()) {
     row_size_upper_bound = ComputeRowSizeUpperBound(tables);
   }
@@ -497,7 +498,7 @@ bool GPUHashJoinIterator::Init() {
       continue;
     }
 
-    auto row_buf = store_row_to_buffer(m_build_input_tables);
+    auto row_buf = store_row_to_buffer(m_build_input_tables, m_row_size);
     if (row_buf.empty()) {
       // Handle error: failed to store row buffer
       return true;
@@ -553,7 +554,7 @@ int GPUHashJoinIterator::Read() {
         continue;
       }
 
-      auto probe_row_buf = store_row_to_buffer(m_probe_input_tables);
+      auto probe_row_buf = store_row_to_buffer(m_probe_input_tables, m_row_size);
       if (probe_row_buf.empty()) {
         return 1;  // error
       }
@@ -615,6 +616,72 @@ int GPUHashJoinIterator::Read() {
     LoadIntoTableBuffers(m_probe_input_tables, probe_row_buf.data());
 
     // Return success, one joined row ready
+    return 0;
+  }
+}
+
+bool VectorizedFilterIterator::Init() {
+  m_row_size = ComputeRowSizeUpperBound(m_tables);
+  return m_source->Init();
+}
+
+int VectorizedFilterIterator::Read() {
+  for (;;) {
+    int ret = m_source->Read();
+    if (ret == 1)    
+      return 1;
+    thd()->check_yield();
+
+    if (ret == 0) {
+      // 1a) pack it into an in‐memory buffer
+      auto row_buf = store_row_to_buffer(m_tables, m_row_size);
+      if (row_buf.empty()) {
+        log_to_file("VectorizedFilterIterator: failed to pack row");
+        return 1;
+      }
+      m_rows_queue.push(std::move(row_buf));
+
+      // 1b) ask the semantic‐filter to build its prompt
+      auto *sf = static_cast<Item_func_semantic_filter*>(m_condition);
+      std::string prompt = sf->compute_prompt();
+
+      // 1c) submit that prompt to the LLM helper
+      if (m_buffer_manager.PushTuple(prompt)) {
+        log_to_file("VectorizedFilterIterator: PushTuple failed");
+        return 1;
+      }
+    }
+    else if (ret == -1) {
+      // upstream exhausted → flush final batch
+      if (m_buffer_manager.FlushBatch()) {
+        log_to_file("VectorizedFilterIterator: FlushBatch failed");
+        return 1;
+      }
+    }
+
+    // 2) try to fetch one boolean result
+    auto res_ptr = m_buffer_manager.PopResult();
+    if (!res_ptr) {
+      // no result yet
+      if (ret == -1) 
+        return -1; // done
+      if (!m_buffer_manager.IsExternalCallRunning())
+        continue;
+      return 0;
+    }
+
+    // 3) we have a definitive true/false
+    bool matched = (*res_ptr != 0);
+    auto row_buf = std::move(m_rows_queue.front());
+    m_rows_queue.pop();
+
+    if (!matched) {
+      m_source->UnlockRow();
+      continue;
+    }
+
+    // 4) matched → emit
+    LoadIntoTableBuffers(m_tables, row_buf.data());
     return 0;
   }
 }

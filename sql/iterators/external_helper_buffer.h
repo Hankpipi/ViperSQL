@@ -5,14 +5,15 @@
 #include <queue>
 #include <string>
 #include <memory>
-#include "sql/iterators/gpu_helpers/gpu_hash_join.h"
+#include "sql/iterators/helpers/gpu_hash_join.h"
+#include "sql/iterators/helpers/model_api.h"
 
-// Forward declaration of the GPU helper interface
+// Forward declaration of the helper interface
 class ExternalHelperInterface;
 
-/// Template class managing CPU buffers, GPU helper calls, and result queue.
-/// TupleType: type of tuples sent to GPU (e.g., build/probe rows)
-/// ResultType: type of results returned from GPU (e.g., matched indices)
+/// Template class managing CPU buffers, helper calls, and result queue.
+/// TupleType: type of tuples sent to external helper (e.g., tuples)
+/// ResultType: type of results returned from helper (e.g., matched indices)
 template <typename TupleType, typename ResultType>
 class ExternalHelperBufferManager {
 public:
@@ -43,7 +44,7 @@ private:
   size_t m_estimated_rows;
   std::string m_helper_name;
 
-  std::unique_ptr<ExternalHelperInterface> m_gpu_helper;
+  std::unique_ptr<ExternalHelperInterface> m_helper;
 
   bool m_external_call_running = false;
 };
@@ -60,30 +61,34 @@ ExternalHelperBufferManager<TupleType, ResultType>::ExternalHelperBufferManager(
   m_batch_size = BATCH_SIZE;
 
   if (helper_name == "GPUHashJoinHelper") {
-    m_gpu_helper = std::make_unique<gpuhashjoinhelpers::GPUHashJoinHelper>();
-  } else {
+    m_helper = std::make_unique<gpuhashjoinhelpers::GPUHashJoinHelper>();
+  }
+  else if (helper_name == "LLMFilter") {
+    m_helper = std::make_unique<llmhelpers::LLMFilterHelper>();
+  }
+  else {
     log_to_file("Unknown helper: " + helper_name);
-    m_gpu_helper = nullptr;
+    m_helper = nullptr;
   }
 
-  if (m_gpu_helper) {
-    if (m_gpu_helper->Init(m_estimated_rows)) {
+  if (m_helper) {
+    if (m_helper->Init(m_estimated_rows)) {
       log_to_file("Failed to initialize helper: " + helper_name);
-      m_gpu_helper.reset();
+      m_helper.reset();
     }
   }
 }
 
 template <typename TupleType, typename ResultType>
 ExternalHelperBufferManager<TupleType, ResultType>::~ExternalHelperBufferManager() {
-  if (m_gpu_helper) {
-    m_gpu_helper->Destroy();
+  if (m_helper) {
+    m_helper->Destroy();
   }
 }
 
 template <typename TupleType, typename ResultType>
 bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() {
-  if (!m_gpu_helper) {
+  if (!m_helper) {
     log_to_file("GPU helper not initialized in FetchAndQueueResults");
     return true;
   }
@@ -92,7 +97,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() 
     return false;
   }
 
-  if (m_gpu_helper->Synchronize()) {
+  if (m_helper->Synchronize()) {
     log_to_file("Failed to synchronize GPU in FetchAndQueueResults");
     return true;
   }
@@ -100,7 +105,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() 
   std::vector<ResultType> results_buffer(m_batch_size);
   size_t results_count = 0;
 
-  if (m_gpu_helper->FetchResults(results_buffer.data(), &results_count)) {
+  if (m_helper->FetchResults(results_buffer.data(), &results_count)) {
     log_to_file("Failed to fetch results from GPU in FetchAndQueueResults");
     return true;
   }
@@ -116,7 +121,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() 
 
 template <typename TupleType, typename ResultType>
 bool ExternalHelperBufferManager<TupleType, ResultType>::PushTuple(const TupleType& tuple) {
-  if (!m_gpu_helper) {
+  if (!m_helper) {
     log_to_file("GPU helper not initialized in PushTuple");
     return true;
   }
@@ -127,7 +132,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::PushTuple(const TupleTy
     if (FetchAndQueueResults()) {
       return true;
     }
-    if (m_gpu_helper->SubmitBatch(m_input_buffer.data(), m_input_buffer.size())) {
+    if (m_helper->SubmitBatch(m_input_buffer.data(), m_input_buffer.size())) {
       log_to_file("Failed to submit batch to GPU in PushTuple");
       return true;
     }
@@ -140,7 +145,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::PushTuple(const TupleTy
 
 template <typename TupleType, typename ResultType>
 bool ExternalHelperBufferManager<TupleType, ResultType>::FlushBatch() {
-  if (!m_gpu_helper) {
+  if (!m_helper) {
     log_to_file("GPU helper not initialized in FlushBatch");
     return true;
   }
@@ -153,7 +158,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::FlushBatch() {
     return false;
   }
 
-  if (m_gpu_helper->SubmitBatch(m_input_buffer.data(), m_input_buffer.size())) {
+  if (m_helper->SubmitBatch(m_input_buffer.data(), m_input_buffer.size())) {
     log_to_file("Failed to submit batch in FlushBatch");
     return true;
   }
@@ -182,8 +187,8 @@ std::unique_ptr<ResultType> ExternalHelperBufferManager<TupleType, ResultType>::
 
 template <typename TupleType, typename ResultType>
 void ExternalHelperBufferManager<TupleType, ResultType>::SetStatus(const std::string& status) {
-  if (m_gpu_helper) {
-    m_gpu_helper->SetStatus(status);
+  if (m_helper) {
+    m_helper->SetStatus(status);
   }
 }
 
