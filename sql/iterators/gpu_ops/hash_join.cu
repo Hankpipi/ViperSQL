@@ -130,7 +130,7 @@ bool LaunchBuildKernel(const PackedKey* d_keys, const uint32_t* d_indices,
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {
-    printf("BuildHashTableKernel launch failed: %s\n", cudaGetErrorString(err));
+    log_to_file(std::string("BuildHashTableKernel launch failed: ") + cudaGetErrorString(err));
     return true;
   }
   return false;
@@ -144,7 +144,7 @@ bool LaunchProbeKernel(const PackedKey* d_probe_keys, size_t n_probe_keys,
   // Reset result buffer to NOT_FOUND (0xFFFFFFFF)
   cudaError_t err = cudaMemsetAsync(d_result_buffer, NOT_FOUND, BATCH_SIZE * sizeof(uint32_t), stream);
   if (err != cudaSuccess) {
-    printf("cudaMemsetAsync failed for result buffer: %s\n", cudaGetErrorString(err));
+    log_to_file(std::string("cudaMemsetAsync failed for result buffer: ") + cudaGetErrorString(err));
     return true;
   }
 
@@ -156,7 +156,7 @@ bool LaunchProbeKernel(const PackedKey* d_probe_keys, size_t n_probe_keys,
 
   err = cudaGetLastError();
   if (err != cudaSuccess) {
-    printf("ProbeHashTableKernel launch failed: %s\n", cudaGetErrorString(err));
+    log_to_file(std::string("ProbeHashTableKernel launch failed: ") + cudaGetErrorString(err));
     return true;
   }
   return false;

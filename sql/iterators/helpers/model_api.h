@@ -39,11 +39,12 @@ public:
   void SetStatus(const std::string& status) override;
 
 private:
-  size_t                    m_capacity;      ///< batch size
-  std::vector<std::string>  m_prompts;       ///< stored prompts
-  std::string               m_raw_response;  ///< full LLM output
-  std::vector<uint8_t>      m_results;       ///< parsed true/false per prompt
-  std::future<void>         m_future;        ///< async handle for the LLM call
+  size_t                    m_capacity;       ///< batch size
+  size_t                    m_expected_count; ///< last submit question count
+  std::vector<std::string>  m_prompts;        ///< stored prompts
+  std::string               m_raw_response;   ///< full LLM output
+  std::vector<uint8_t>      m_results;        ///< parsed true/false per prompt
+  std::future<void>         m_future;         ///< async handle for the LLM call
 };
 
 }  // namespace llmhelpers

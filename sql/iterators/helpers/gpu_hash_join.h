@@ -18,6 +18,8 @@ struct KeyIndexPair {
 namespace gpuhashjoinhelpers {
 
 static constexpr int MAX_KEY_SIZE = 32;
+static constexpr size_t MIN_TABLE_CAPACITY = 1 << 20;
+static constexpr size_t MAX_TABLE_CAPACITY = 1 << 27;
 static constexpr uint32_t NOT_FOUND = 0xFFFFFFFF;
 
 struct PackedKey {
@@ -44,6 +46,7 @@ bool LaunchProbeKernel(const PackedKey* d_probe_keys, size_t n_probe_keys,
 class GPUHashJoinHelper : public ExternalHelperInterface {
 public:
   GPUHashJoinHelper();
+  GPUHashJoinHelper(size_t batch_size_);
   ~GPUHashJoinHelper() override;
 
   bool Init(size_t capacity) override;
@@ -70,6 +73,7 @@ private:
   PackedKey* d_probe_keys_ = nullptr;
   uint32_t* d_result_indices_ = nullptr;
 
+  size_t batch_size;
   size_t capacity_ = 0;
   size_t last_n_tuples = 0;
   cudaStream_t stream_ = nullptr;

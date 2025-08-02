@@ -384,6 +384,7 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
   unique_ptr_destroy_only<RowIterator> ret;
   Mem_root_array<IteratorToBeCreated> todo(mem_root);
   todo.push_back({top_path, top_join, top_eligible_for_batch_mode, &ret, {}});
+  int num_vectorized_ops_left = NUM_VECTORIZED_OPS;
 
   // The access path trees can be pretty deep, and the stack frames can be big
   // on certain compilers/setups, so instead of explicit recursion, we push jobs
@@ -752,7 +753,20 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         break;
       }
       case AccessPath::HASH_JOIN: {
-        const auto &param = path->hash_join();
+        auto &param = path->hash_join();
+        double estimated_build_rows = param.inner->num_output_rows();
+        double estimated_probe_rows = param.outer->num_output_rows();
+        if (estimated_build_rows > 0 && estimated_probe_rows > 0 && estimated_probe_rows < estimated_build_rows) {
+          std::swap(param.inner, param.outer);
+          std::swap(estimated_build_rows, estimated_probe_rows);
+        }
+        bool use_gpu_hash_join = (estimated_build_rows * estimated_probe_rows) > 1e6;
+        if (param.inner->num_output_rows() < 0.0) {
+          // Not all access paths may propagate their costs properly.
+          // Choose a fairly safe estimate (it's better to be too large
+          // than too small).
+          estimated_build_rows = 1048576.0;
+        }
         if (job.children.is_null()) {
           SetupJobsForChildren(mem_root, param.outer, param.inner, join,
                                /*inner_eligible_for_batch_mode=*/true, &job,
@@ -766,13 +780,7 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         }
         const bool probe_input_batch_mode =
             eligible_for_batch_mode && ShouldEnableBatchMode(param.outer);
-        double estimated_build_rows = param.inner->num_output_rows();
-        if (param.inner->num_output_rows() < 0.0) {
-          // Not all access paths may propagate their costs properly.
-          // Choose a fairly safe estimate (it's better to be too large
-          // than too small).
-          estimated_build_rows = 1048576.0;
-        }
+
         JoinType join_type{JoinType::INNER};
         switch (join_predicate->expr->type) {
           case RelationalExpression::INNER_JOIN:
@@ -819,8 +827,19 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
              path->parameter_tables == 0)
                 ? &join->hash_table_generation
                 : nullptr;
-
-        iterator = NewIterator<GPUHashJoinIterator>(
+        if (use_gpu_hash_join && (conditions.empty() || num_vectorized_ops_left <= 0)) {
+          iterator = NewIterator<HashJoinIterator>(
+              thd, mem_root, std::move(job.children[1]),
+              GetUsedTables(param.inner, /*include_pruned_tables=*/true),
+              estimated_build_rows, std::move(job.children[0]),
+              GetUsedTables(param.outer, /*include_pruned_tables=*/true),
+              param.store_rowids, param.tables_to_get_rowid_for,
+              thd->variables.join_buff_size, std::move(conditions),
+              param.allow_spill_to_disk, join_type,
+              join_predicate->expr->join_conditions, probe_input_batch_mode,
+            hash_table_generation);
+        } else {
+          iterator = NewIterator<GPUHashJoinIterator>(
             thd, mem_root, std::move(job.children[1]),
             GetUsedTables(param.inner, /*include_pruned_tables=*/true),
             estimated_build_rows, std::move(job.children[0]),
@@ -830,6 +849,9 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
             param.allow_spill_to_disk, join_type,
             join_predicate->expr->join_conditions, probe_input_batch_mode,
             hash_table_generation);
+
+          --num_vectorized_ops_left;
+        }
         break;
       }
       case AccessPath::FILTER: {
@@ -843,6 +865,9 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
           return nullptr;
         }
         if (Item *sem = find_semantic_filter(param.condition)) {
+          ha_rows num_rows_estimate = param.child->num_output_rows() < 0.0
+                                          ? HA_POS_ERROR
+                                          : lrint(param.child->num_output_rows());
           Prealloced_array<TABLE*, 4> tables =
               GetUsedTables(param.child, /*include_pruned_tables=*/true);
           iterator = NewIterator<VectorizedFilterIterator>(
@@ -852,7 +877,8 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
               TableCollection(tables, /*store_rowids=*/false,
                             /*tables_to_get_rowid_for=*/0,
                             GetNullableEqRefTables(param.child)),
-              sem);
+              sem, 
+              num_rows_estimate);
         }
         else {
           // fall back to the old, row‐by‐row FilterIterator
@@ -923,7 +949,7 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         }
 
         iterator = unique_ptr_destroy_only<RowIterator>(
-            gpu_temptable_aggregate_iterator::CreateIterator(
+            temptable_aggregate_iterator::CreateIterator(
                 thd, std::move(job.children[0]), param.temp_table_param,
                 param.table, std::move(job.children[1]), join,
                 param.ref_slice));

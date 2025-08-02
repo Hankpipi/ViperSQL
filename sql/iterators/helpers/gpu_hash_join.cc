@@ -9,6 +9,13 @@ GPUHashJoinHelper::GPUHashJoinHelper() : d_keys_(nullptr), d_indices_(nullptr), 
                                          capacity_(0), stream_(nullptr),
                                          current_status_("UNINITIALIZED") {}
 
+GPUHashJoinHelper::GPUHashJoinHelper(size_t batch_size_)
+    : d_keys_(nullptr), d_indices_(nullptr), d_hash_table_(nullptr),
+      d_probe_keys_(nullptr), d_result_indices_(nullptr),
+      capacity_(0), stream_(nullptr),
+      batch_size(batch_size_), current_status_("UNINITIALIZED") {}
+
+
 // Destructor
 GPUHashJoinHelper::~GPUHashJoinHelper() {
   Destroy();
@@ -16,8 +23,10 @@ GPUHashJoinHelper::~GPUHashJoinHelper() {
 
 bool GPUHashJoinHelper::Init(size_t capacity) {
   // Make sure the capacity_ is power of 2
-  if (capacity < 1048576) {
-    capacity_ = 1048576;
+  if (capacity < MIN_TABLE_CAPACITY) {
+    capacity_ = MIN_TABLE_CAPACITY;
+  } else if (capacity > MAX_TABLE_CAPACITY) {
+    capacity_ = MAX_TABLE_CAPACITY;
   } else {
     capacity_ = 1;
     while (capacity_ < capacity) {
@@ -47,28 +56,28 @@ bool GPUHashJoinHelper::Init(size_t capacity) {
   }
 
   // Allocate keys buffer (max capacity * max key size)
-  err = cudaMalloc(&d_keys_, BATCH_SIZE * MAX_KEY_SIZE * sizeof(uint8_t));
+  err = cudaMalloc(&d_keys_, batch_size * MAX_KEY_SIZE * sizeof(uint8_t));
   if (err != cudaSuccess) {
     log_to_file("cudaMalloc failed for d_keys_");
     return true;
   }
 
   // Allocate keys buffer (max capacity * max key size)
-  err = cudaMalloc(&d_indices_, BATCH_SIZE * sizeof(uint32_t));
+  err = cudaMalloc(&d_indices_, batch_size * sizeof(uint32_t));
   if (err != cudaSuccess) {
     log_to_file("cudaMalloc failed for d_indices_");
     return true;
   }
 
   // Allocate probe keys buffer (same size as build keys buffer for simplicity)
-  err = cudaMalloc(&d_probe_keys_, BATCH_SIZE * MAX_KEY_SIZE * sizeof(uint8_t));
+  err = cudaMalloc(&d_probe_keys_, batch_size * MAX_KEY_SIZE * sizeof(uint8_t));
   if (err != cudaSuccess) {
     log_to_file("cudaMalloc failed for d_probe_keys_");
     return true;
   }
 
   // Allocate result indices buffer for matched pairs
-  err = cudaMalloc(&d_result_indices_, BATCH_SIZE * sizeof(uint32_t));
+  err = cudaMalloc(&d_result_indices_, batch_size * sizeof(uint32_t));
   if (err != cudaSuccess) {
     log_to_file("cudaMalloc failed for d_result_indices_");
     return true;
@@ -174,9 +183,9 @@ bool GPUHashJoinHelper::FetchResults(void* out_buffer, size_t* out_result_count)
     return false;
   }
 
-  // Copy entire device result buffer (size = BATCH_SIZE) to host directly into out_buffer
+  // Copy entire device result buffer (size = batch_size) to host directly into out_buffer
   cudaError_t err = cudaMemcpy(out_buffer, d_result_indices_,
-                               BATCH_SIZE * sizeof(uint32_t),
+                               batch_size * sizeof(uint32_t),
                                cudaMemcpyDeviceToHost);
   if (err != cudaSuccess) {
     log_to_file("cudaMemcpy failed in FetchResults");
@@ -222,12 +231,12 @@ void GPUHashJoinHelper::Destroy() {
     stream_ = nullptr;
   }
   current_status_ = "DESTROYED";
-  log_to_file("GPUHashJoinHelper destroyed");
+  // log_to_file("GPUHashJoinHelper destroyed");
 }
 
 void GPUHashJoinHelper::SetStatus(const std::string& status) {
   current_status_ = status;
-  log_to_file("GPUHashJoinHelper status set to: " + status);
+  // log_to_file("GPUHashJoinHelper status set to: " + status);
 }
 
 void GPUHashJoinHelper::PrintHashTable() {

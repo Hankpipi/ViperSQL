@@ -25,14 +25,26 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
   return size * nmemb;
 }
 
-// Single async call helper
-static std::string call_openai_api(const std::string& prompt, const std::string& api_key) {
+// Picks model dynamically and issues the HTTP request.
+// - If approx_tokens(prompt + expected output) ≤ 16000: use gpt-4o-mini
+// - Otherwise: gpt-4.1-nano
+static std::string call_openai_api(const std::string& prompt,
+                                   const std::string& api_key,
+                                   size_t expected_output_tokens) {
+  // approx tokens = chars/4
+  size_t approx_in = prompt.size() / 4;
+  size_t total = approx_in + expected_output_tokens;
+  const char* model =
+      (total <= 12000) ? "openai/gpt-4o-mini" : "openai/gpt-4.1-nano";
+
   CURL* curl = curl_easy_init();
   std::string readBuffer;
   if (!curl) return readBuffer;
 
+  // Build payload, include max_tokens
   json payload = {
-    {"model", "openai/gpt-4o-mini"},
+    {"model", model},
+    {"max_tokens", (int)expected_output_tokens},
     {"messages", {{{"role", "user"}, {"content", prompt}}}}
   };
   std::string payload_str = payload.dump();
@@ -44,6 +56,7 @@ static std::string call_openai_api(const std::string& prompt, const std::string&
   curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/chat/completions");
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
   curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload_str.c_str());
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload_str.size());
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
   curl_easy_perform(curl);
@@ -51,7 +64,7 @@ static std::string call_openai_api(const std::string& prompt, const std::string&
   curl_slist_free_all(headers);
   curl_easy_cleanup(curl);
 
-  // parse JSON
+  // extract the assistant's content field
   try {
     auto resp = json::parse(readBuffer);
     return resp["choices"][0]["message"]["content"].get<std::string>();
@@ -71,28 +84,53 @@ bool LLMFilterHelper::Init(size_t capacity) {
 }
 
 bool LLMFilterHelper::SubmitBatch(const void* host_data, size_t n_rows) {
-  // 1) Gather the N prompts
+  // Record expected count
+  m_expected_count = n_rows;
+  size_t expected_output_tokens = n_rows;
+
+  // Copy raw prompts
   const std::string* host_prompts = static_cast<const std::string*>(host_data);
   m_prompts.assign(host_prompts, host_prompts + n_rows);
 
-  // 2) Build a JSON‐output prompt
+  // Build the combined prompt with filtered text
   std::ostringstream oss;
-  oss << "You will be given " << n_rows << " questions.  "
-      << "Answer with a JSON array of booleans (true/false) of length "
-      << n_rows << ", in plain text—*no* markdown or code fences.\nQuestions:\n";
+  oss << "For each of the following " << n_rows
+      << " questions, decide true (1) or false (0). "
+      << "Output ONLY a single concatenated string of length "
+      << n_rows << " consisting of the digits '0' and '1'—"
+      << "no quotes, no spaces, no newlines, no commentary.\nQuestions:\n";
+
   for (size_t i = 0; i < n_rows; ++i) {
-    oss << i+1 << ". " << m_prompts[i] << "\n";
+    // Filter out unwanted characters
+    const std::string &raw = m_prompts[i];
+    std::string filtered;
+    filtered.reserve(raw.size());
+    for (char c : raw) {
+      if (std::isalpha(static_cast<unsigned char>(c)) ||
+          c == ',' ||
+          c == '.' ||
+          c == ' ') {
+        filtered.push_back(c);
+      }
+    }
+    // Trim trailing spaces
+    while (!filtered.empty() && filtered.back() == ' ') {
+      filtered.pop_back();
+    }
+    oss << "Question(" << (i + 1) << "): " << filtered << "\n";
   }
+
   std::string combined = oss.str();
 
-  // 3) Fire off the async LLM call
-  std::string api_key = get_openai_api_key();
-  if (api_key.empty()) {
+  // Launch async LLM call
+  const char* key = std::getenv("OPENAI_API_KEY");
+  if (!key) {
     log_to_file("LLMFilterHelper: missing OPENAI_API_KEY");
     return true;
   }
-  m_future = std::async(std::launch::async, [this, combined, api_key]() {
-    m_raw_response = call_openai_api(combined, api_key);
+  std::string api_key(key);
+  m_future = std::async(std::launch::async, [this, combined, api_key, expected_output_tokens]() {
+    m_raw_response = call_openai_api(combined, api_key, expected_output_tokens);
   });
 
   return false;
@@ -106,34 +144,27 @@ bool LLMFilterHelper::Synchronize() {
 }
 
 bool LLMFilterHelper::FetchResults(void* out_buffer, size_t* out_result_count) {
+  // wait for the async call if needed
+  if (m_future.valid()) m_future.wait();
+
+  // Parse m_raw_response for the first m_expected_count characters '0'/'1'
   m_results.clear();
-  try {
-    auto j = json::parse(m_raw_response);
-    if (j.is_array()) {
-      // Copy up to N values
-      for (size_t i = 0; i < j.size() && i < m_prompts.size(); ++i) {
-        m_results.push_back(j[i].get<bool>() ? 1 : 0);
-      }
-    } else {
-      log_to_file("LLMFilterHelper: JSON was not an array, cannot parse directly.");
+  m_results.reserve(m_expected_count);
+  for (char c : m_raw_response) {
+    if (c == '0' || c == '1') {
+      m_results.push_back(static_cast<uint8_t>(c - '0'));
+      if (m_results.size() == m_expected_count) break;
     }
-  } catch (const json::exception &e) {
-    log_to_file(std::string("LLMFilterHelper: JSON parse error: ") + e.what());
+  }
+  // Pad with 0 if too short
+  if (m_results.size() < m_expected_count) {
+    m_results.resize(m_expected_count, 0);
   }
 
-  // 4) Pad or truncate so we always have exactly N entries
-  if (m_results.size() < m_prompts.size()) {
-    m_results.resize(m_prompts.size(), 0);
-  } else if (m_results.size() > m_prompts.size()) {
-    m_results.resize(m_prompts.size());
-  }
-
-  // 5) Copy out
+  // Copy out
   uint8_t* out = static_cast<uint8_t*>(out_buffer);
-  for (size_t i = 0; i < m_results.size(); ++i) {
-    out[i] = m_results[i];
-  }
-  *out_result_count = m_results.size();
+  for (size_t i = 0; i < m_expected_count; ++i) out[i] = m_results[i];
+  *out_result_count = m_expected_count;
   return false;
 }
 

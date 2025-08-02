@@ -6,6 +6,8 @@
 #include "sql/iterators/helpers/gpu_hash_join.h"
 #include "sql/iterators/external_helper_buffer.h"
 
+static constexpr int NUM_VECTORIZED_OPS = 3;
+
 namespace gpu_temptable_aggregate_iterator {
 /**
    Create an iterator that aggregates the output rows from another iterator
@@ -112,13 +114,13 @@ class VectorizedFilterIterator final : public RowIterator {
  public:
   VectorizedFilterIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
                  pack_rows::TableCollection tables,
-                 Item *condition)
+                 Item *condition, size_t num_rows_estimate)
     : RowIterator(thd),
       m_source(std::move(source)),
       m_tables(std::move(tables)),
       m_condition(condition),
       m_buffer_manager(64LL * 1024 * 1024,
-                       BATCH_SIZE,
+                       num_rows_estimate,
                        "LLMFilter") {}
 
   bool Init() override;

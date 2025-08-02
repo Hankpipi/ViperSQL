@@ -203,7 +203,7 @@ bool GPUTemptableAggregateIterator<Profiler>::Init() {
   std::unordered_map<uint64_t, std::string> hash_to_rawkey;
 
   // 4) Enter GPU-accelerated aggregation path
-  constexpr size_t GPU_BATCH_SZ = 8192;
+  constexpr size_t GPU_BATCH_SZ = BATCH_SIZE;
   GPUHashTable*   gpu_ht  = nullptr;
   GPUAccumulator* gpu_acc = nullptr;
   size_t gpu_cap = 1 << 20;

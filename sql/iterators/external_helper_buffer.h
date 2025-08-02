@@ -61,9 +61,15 @@ ExternalHelperBufferManager<TupleType, ResultType>::ExternalHelperBufferManager(
   m_batch_size = BATCH_SIZE;
 
   if (helper_name == "GPUHashJoinHelper") {
-    m_helper = std::make_unique<gpuhashjoinhelpers::GPUHashJoinHelper>();
+    m_helper = std::make_unique<gpuhashjoinhelpers::GPUHashJoinHelper>(m_batch_size);
   }
   else if (helper_name == "LLMFilter") {
+    m_batch_size = std::min<size_t>(32, m_estimated_rows);
+    while (m_batch_size < 512) {
+      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
+      if (calls < 100) break;
+      m_batch_size <<= 1;
+    }
     m_helper = std::make_unique<llmhelpers::LLMFilterHelper>();
   }
   else {
