@@ -64,5 +64,5 @@
 
 ## Evaluation
 
-Detailed instructions on datasets and benchmarking procedures can be found in the [Benchmark Directory](./benchmark/README).
+Detailed instructions on datasets and benchmarking procedures can be found in the [Benchmark Directory](./benchmark/README.md).
 
