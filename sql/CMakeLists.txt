@@ -410,7 +410,7 @@ SET(SQL_SHARED_SOURCES
   item_json_func.cc
   item_fb_vector_func.cc
   item_regexp_func.cc
-  item_semantic_filter_func.cc
+  item_semantic_func.cc
   item_row.cc
   item_strfunc.cc
   item_subselect.cc

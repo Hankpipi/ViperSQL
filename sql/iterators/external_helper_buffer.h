@@ -72,6 +72,11 @@ ExternalHelperBufferManager<TupleType, ResultType>::ExternalHelperBufferManager(
     }
     m_helper = std::make_unique<llmhelpers::LLMFilterHelper>();
   }
+  else if (helper_name == "semantic_generate") {
+    // Batch-size policy same as LLMFilter for now
+    m_batch_size = 4;
+    m_helper = std::make_unique<llmhelpers::LLMGenerateHelper>();
+  }
   else {
     log_to_file("Unknown helper: " + helper_name);
     m_helper = nullptr;

@@ -14,7 +14,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
-#include "sql/item_semantic_filter_func.h"
+#include "sql/item_semantic_func.h"
 #include <stdexcept>
 // #ifdef WITH_SEMANTICDB
 // #endif
@@ -74,7 +74,7 @@ bool parse_string_from_item(Item **args, uint arg_idx, String &str,
   return true;
 }
 
-Item* find_semantic_filter(Item* node) {
+Item* find_semantic_func(Item* node) {
   if (!node) return nullptr;
 
   // 1) If this node *is* a semantic‐filter, bingo:
@@ -89,7 +89,7 @@ Item* find_semantic_filter(Item* node) {
   uint cnt = fn->argument_count();
   for (uint i = 0; i < cnt; i++) {
     Item *child = fn->arguments()[i];
-    if (Item *hit = find_semantic_filter(child)) {
+    if (Item *hit = find_semantic_func(child)) {
       return hit;
     }
   }
@@ -174,6 +174,8 @@ std::string Item_func_semantic_filter::compute_prompt() {
   return "";
 }
 
+// ------------ Semantic Filter --------------
+
 Item_func_semantic_filter_single_col::Item_func_semantic_filter_single_col(THD *thd, const POS &pos,
                                                PT_item_list *a)
     : Item_func_semantic_filter(thd, pos, a) {}
@@ -193,3 +195,15 @@ const char *Item_func_semantic_filter_two_col::func_name() const { return "seman
 enum Item_func::Functype Item_func_semantic_filter_two_col::functype() const {
   return SEMANTIC_FILTER_TWO_COL;
 }
+
+// ------------ Semantic Generate --------------
+
+const char *Item_func_semantic_generate::func_name() const { return "semantic_generate"; }
+
+enum Item_func::Functype Item_func_semantic_generate::functype() const {
+  return SEMANTIC_GENERATE;
+}
+
+Item_func_semantic_generate::Item_func_semantic_generate(THD *thd, const POS &pos,
+                                               PT_item_list *a)
+    : Item_func_semantic_filter(thd, pos, a) {}

@@ -306,7 +306,8 @@ class Item_func : public Item_result_field {
     FB_VECTOR_JSON_TO_BLOB,
     // semantic db functions
     SEMANTIC_FILTER_SINGLE_COL,
-    SEMANTIC_FILTER_TWO_COL
+    SEMANTIC_FILTER_TWO_COL,
+    SEMANTIC_GENERATE
   };
   enum optimize_type {
     OPTIMIZE_NONE,

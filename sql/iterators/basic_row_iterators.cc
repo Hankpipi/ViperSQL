@@ -50,6 +50,7 @@
 #include "sql/sql_tmp_table.h"
 #include "sql/system_variables.h"
 #include "sql/table.h"
+#include "sql/iterators/external_helper_interface.h"
 
 using std::string;
 using std::vector;
