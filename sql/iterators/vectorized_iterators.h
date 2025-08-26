@@ -98,7 +98,7 @@ class GPUHashJoinIterator : public RowIterator {
 
   // Buffer manager encapsulating input batch and result queue
   String m_buffer;
-  ExternalHelperBufferManager<KeyIndexPair, uint32_t> m_buffer_manager;
+  ViperFlow<KeyIndexPair, uint32_t> m_buffer_manager;
   
   size_t m_row_size;
 
@@ -121,7 +121,7 @@ class VectorizedFilterIterator final : public RowIterator {
       m_condition(condition),
       m_buffer_manager(64LL * 1024 * 1024,
                        num_rows_estimate,
-                       "LLMFilter") {}
+                       "semantic_filter") {}
 
   bool Init() override;
 
@@ -144,7 +144,7 @@ class VectorizedFilterIterator final : public RowIterator {
 
   size_t m_row_size;
   std::queue<std::vector<uint8_t>> m_rows_queue;
-  ExternalHelperBufferManager<std::string, uint8_t> m_buffer_manager;
+  ViperFlow<std::string, uint8_t> m_buffer_manager;
 };
 
 #endif

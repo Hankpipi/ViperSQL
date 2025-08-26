@@ -180,7 +180,7 @@ Item_func_semantic_filter_single_col::Item_func_semantic_filter_single_col(THD *
                                                PT_item_list *a)
     : Item_func_semantic_filter(thd, pos, a) {}
 
-const char *Item_func_semantic_filter_single_col::func_name() const { return "semantic_filter_single_col"; }
+const char *Item_func_semantic_filter_single_col::func_name() const { return "semantic_filter"; }
 
 enum Item_func::Functype Item_func_semantic_filter_single_col::functype() const {
   return SEMANTIC_FILTER_SINGLE_COL;
@@ -190,7 +190,7 @@ Item_func_semantic_filter_two_col::Item_func_semantic_filter_two_col(THD *thd, c
                                                PT_item_list *a)
     : Item_func_semantic_filter(thd, pos, a) {}
 
-const char *Item_func_semantic_filter_two_col::func_name() const { return "semantic_filter_two_col"; }
+const char *Item_func_semantic_filter_two_col::func_name() const { return "semantic_filter"; }
 
 enum Item_func::Functype Item_func_semantic_filter_two_col::functype() const {
   return SEMANTIC_FILTER_TWO_COL;

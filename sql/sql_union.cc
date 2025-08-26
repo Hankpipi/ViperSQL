@@ -1835,7 +1835,7 @@ bool execute_root_with_optional_batch(
   std::vector<int> sem_field_indices; sem_field_indices.reserve(fields->size());
 
   // Managers are indexed by field position; nullptr for non-semantic fields
-  std::vector<std::unique_ptr<ExternalHelperBufferManager<std::string,std::string>>> sem_mgrs(fields->size());
+  std::vector<std::unique_ptr<ViperFlow<std::string,std::string>>> sem_mgrs(fields->size());
 
   {
     bool any_sem = false;
@@ -1854,7 +1854,7 @@ bool execute_root_with_optional_batch(
         if (auto* f = dynamic_cast<Item_int_func*>(it)) fn = f->func_name();
         std::string helper_name = fn ? std::string(fn) : std::string("semantic_helper");
 
-        sem_mgrs[i] = std::make_unique<ExternalHelperBufferManager<std::string,std::string>>(
+        sem_mgrs[i] = std::make_unique<ViperFlow<std::string,std::string>>(
             kHelperMaxMem, kEstimatedRows, helper_name);
       }
       ++i;

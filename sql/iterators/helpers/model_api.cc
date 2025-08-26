@@ -278,7 +278,6 @@ bool LLMGenerateHelper::SubmitBatch(const void* host_data, size_t n_rows) {
   oss << "\nReturn the JSON array now.";
 
   std::string combined = oss.str();
-  log_to_file("prompt: " + combined);
 
   // Token budget: ~128 tokens per output item (adjustable).
   size_t expected_output_tokens = std::min<size_t>(n_rows * 128, 8192);
@@ -315,7 +314,6 @@ bool LLMGenerateHelper::FetchResults(void* out_buffer, size_t* out_result_count)
     if (out_result_count) *out_result_count = N;
     return false;
   };
-  log_to_file("m_raw_response: " + m_raw_response);
 
   // SIMPLE ERROR CHECK: e.g. {"error":{"message":"User not found.","code":401}}
   if (m_raw_response.find("\"error\":{\"message\":") != std::string::npos) {
