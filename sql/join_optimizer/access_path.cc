@@ -27,7 +27,7 @@
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
 #include "sql/item_sum.h"
-#include "sql/item_semantic_filter_func.h"
+#include "sql/item_semantic_func.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/bka_iterator.h"
 #include "sql/iterators/composite_iterators.h"
@@ -864,7 +864,7 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         if (FinalizeMaterializedSubqueries(thd, join, path)) {
           return nullptr;
         }
-        if (Item *sem = find_semantic_filter(param.condition)) {
+        if (Item *sem = find_semantic_func(param.condition)) {
           ha_rows num_rows_estimate = param.child->num_output_rows() < 0.0
                                           ? HA_POS_ERROR
                                           : lrint(param.child->num_output_rows());
