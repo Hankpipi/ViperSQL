@@ -7,6 +7,7 @@
 #include <memory>
 #include "sql/iterators/helpers/gpu_hash_join.h"
 #include "sql/iterators/helpers/model_api.h"
+#include "sql/iterators/sem_helpers/sem_filter_helper.h"
 
 // Forward declaration of the helper interface
 class ExternalHelperInterface;
@@ -72,6 +73,33 @@ ExternalHelperBufferManager<TupleType, ResultType>::ExternalHelperBufferManager(
     }
     m_helper = std::make_unique<llmhelpers::LLMFilterHelper>();
   }
+  else if (helper_name == "SemFnnFilter") {
+    m_batch_size = std::min<size_t>(32, m_estimated_rows);
+    while (m_batch_size < 512) {
+      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
+      if (calls < 100) break;
+      m_batch_size <<= 1;
+    }
+    m_helper = std::make_unique<semhelpers::SemFilterHelper>("sem_fnn_filter");
+  }
+  else if (helper_name == "SemBertFilter") {
+    m_batch_size = std::min<size_t>(32, m_estimated_rows);
+    while (m_batch_size < 512) {
+      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
+      if (calls < 100) break;
+      m_batch_size <<= 1;
+    }
+    m_helper = std::make_unique<semhelpers::SemFilterHelper>("sem_bert_filter");
+  }
+  else if (helper_name == "SemLLMFilter") {
+    m_batch_size = std::min<size_t>(32, m_estimated_rows);
+    while (m_batch_size < 512) {
+      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
+      if (calls < 100) break;
+      m_batch_size <<= 1;
+    }
+    m_helper = std::make_unique<semhelpers::SemFilterHelper>("sem_llm_filter");
+  }
   else {
     log_to_file("Unknown helper: " + helper_name);
     m_helper = nullptr;
@@ -95,7 +123,7 @@ ExternalHelperBufferManager<TupleType, ResultType>::~ExternalHelperBufferManager
 template <typename TupleType, typename ResultType>
 bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() {
   if (!m_helper) {
-    log_to_file("GPU helper not initialized in FetchAndQueueResults");
+    log_to_file("helper not initialized in FetchAndQueueResults");
     return true;
   }
 
@@ -104,7 +132,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() 
   }
 
   if (m_helper->Synchronize()) {
-    log_to_file("Failed to synchronize GPU in FetchAndQueueResults");
+    log_to_file("Failed to synchronize helper in FetchAndQueueResults");
     return true;
   }
 
@@ -112,7 +140,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() 
   size_t results_count = 0;
 
   if (m_helper->FetchResults(results_buffer.data(), &results_count)) {
-    log_to_file("Failed to fetch results from GPU in FetchAndQueueResults");
+    log_to_file("Failed to fetch results from helper in FetchAndQueueResults");
     return true;
   }
 
@@ -128,7 +156,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() 
 template <typename TupleType, typename ResultType>
 bool ExternalHelperBufferManager<TupleType, ResultType>::PushTuple(const TupleType& tuple) {
   if (!m_helper) {
-    log_to_file("GPU helper not initialized in PushTuple");
+    log_to_file("helper not initialized in PushTuple");
     return true;
   }
 
@@ -139,7 +167,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::PushTuple(const TupleTy
       return true;
     }
     if (m_helper->SubmitBatch(m_input_buffer.data(), m_input_buffer.size())) {
-      log_to_file("Failed to submit batch to GPU in PushTuple");
+      log_to_file("Failed to submit batch to helper in PushTuple");
       return true;
     }
     m_input_buffer.clear();
@@ -152,7 +180,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::PushTuple(const TupleTy
 template <typename TupleType, typename ResultType>
 bool ExternalHelperBufferManager<TupleType, ResultType>::FlushBatch() {
   if (!m_helper) {
-    log_to_file("GPU helper not initialized in FlushBatch");
+    log_to_file("helper not initialized in FlushBatch");
     return true;
   }
 
