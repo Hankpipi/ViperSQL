@@ -104,6 +104,7 @@ Note: YYTHD is passed as an argument to yyparse(), and subsequently to yylex().
 #include "sql/item_cmpfunc.h"
 #include "sql/item_create.h"
 #include "sql/item_func.h"
+#include "sql/item_func_semantic.h"
 #include "sql/item_geofunc.h"
 #include "sql/item_json_func.h"
 #include "sql/item_regexp_func.h"
@@ -1418,6 +1419,10 @@ void warn_about_deprecated_binary(THD *thd)
    Tokens from Spatial MySQL
 */
 %token  SYNC_SYM 1213
+
+%token  SEM_FILTER_SYM 1214
+%token  SEM_JOIN_SYM 1215
+
 
 /*
    Tokens from FB MySQL
@@ -11010,6 +11015,16 @@ function_call_keyword:
           {
             $$= NEW_PTN Item_func_year(@$, $3);
           }
+        /* === add begin: semantic functions === */
+        | SEM_FILTER_SYM '(' expr ',' expr ')'
+          {
+            $$ = new (YYTHD->mem_root) Item_func_sem_filter($3, $5);
+          }
+        | SEM_JOIN_SYM '(' expr ',' expr ',' expr ')'
+          {
+            $$ = new (YYTHD->mem_root) Item_func_sem_join($3, $5, $7);
+          }
+        /* === add end === */
         ;
 
 /*

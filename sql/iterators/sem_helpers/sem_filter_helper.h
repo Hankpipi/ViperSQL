@@ -44,9 +44,9 @@ public:
   void Destroy() override;
   void SetStatus(const std::string& status) override;
 
-  void SetPredicate(std::string predicate) override;
-  void SetModelName(std::string model_name) override;
-  const std::string& GetModelName() override;
+  void SetPredicate(std::string predicate);
+  void SetModelName(std::string model_name);
+  const std::string& GetModelName();
 
 private:
   std::string          m_model_name;     // backend model name

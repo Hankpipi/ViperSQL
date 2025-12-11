@@ -847,6 +847,8 @@ static const SYMBOL symbols[] = {
     {SYM("ZONE", ZONE_SYM)},
     {SYM("||", OR_OR_SYM)},
     {SYM("SYNC", SYNC_SYM)}, 
+    {SYM("SEM_FILTER", SEM_FILTER_SYM)},
+    {SYM("SEM_JOIN", SEM_JOIN_SYM)},
     /*
       Place keywords that accept optimizer hints below this comment.
     */

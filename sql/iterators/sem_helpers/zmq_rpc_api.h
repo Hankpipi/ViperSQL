@@ -22,10 +22,16 @@
 
 #include <string>
 #include <nlohmann/json.hpp>
+#include "sql/iterators/sem_helpers/sem_join_helper.h"
 
 namespace zmq { class context_t; }
 
 namespace semhelpers {
+
+// struct KeyIndexPair {
+//   std::string key; // Join key
+//   size_t index;  // Index of the full row in CPU build buffer
+// };
 
 /**
  * zmq_rpc_call
@@ -52,9 +58,9 @@ nlohmann::json semantic_filter_zmq_rpc_call(const std::string& name,
  * output: none / { "name":"sem_filter", "values":[...] }
  */                                           
 nlohmann::json semantic_join_zmq_rpc_call(const std::string& name,
-                                            const std::vector<std::string>& values,
+                                            const std::vector<semhelpers::KeyIndexPair>& values,
                                             const std::string& predicate,
-                                            const std::string& type)
+                                            const std::string& type);
 
 } // namespace semhelpers
 

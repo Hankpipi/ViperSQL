@@ -112,6 +112,9 @@
 #include "template_utils.h"
 #include "thr_lock.h"
 
+#include "sql/item_func_semantic.h"  
+#include "sql/iterators/external_helper_interface.h"
+
 using std::make_pair;
 using std::max;
 using std::min;
@@ -1950,6 +1953,71 @@ static bool ItemRefersToOneSideOnly(Item *item, table_map left_side,
   return false;
 }
 
+/**
+  Create an AccessPath for a semantic (LLM-based) join.
+*/
+static AccessPath *CreateSemanticJoinAccessPath(
+    THD *thd, QEP_TAB *qep_tab, AccessPath *build_path,
+    qep_tab_map build_tables, AccessPath *probe_path, qep_tab_map probe_tables,
+    JoinType join_type, std::vector<Item *> *join_conditions,
+    table_map *conditions_depend_on_outer_tables) {
+
+  log_to_file("CreateSemanticJoinAccessPath: begin");
+
+  // ----- 1. 构造 RelationalExpression -----
+  RelationalExpression *expr =
+      new (thd->mem_root) RelationalExpression(thd);
+
+  // 语义 join 只支持 inner join 语义，避免和 outer/semi/anti 的 NULL 语义冲突
+  expr->type = RelationalExpression::INNER_JOIN;
+
+  // HGO 场景下的 left/right 在这里用不到，先置空
+  expr->left  = nullptr;
+  expr->right = nullptr;
+
+  // 把所有 join_conditions 都挂在 join_conditions 里（包括 SEM_JOIN(...)）
+  if (join_conditions != nullptr) {
+    for (Item *item : *join_conditions) {
+      if (item == nullptr) continue;
+      expr->join_conditions.push_back(item);
+      // 记录依赖的外层表，用于 optimizer 之后的分析
+      *conditions_depend_on_outer_tables |= item->used_tables();
+    }
+    // 防止后续逻辑（例如 PossiblyAttachFilter）再次使用这些谓词
+    join_conditions->clear();
+  }
+
+  // 语义 join 不做 equi-join 拆分
+  expr->equijoin_conditions.clear();
+
+  // ----- 2. 构造 JoinPredicate -----
+  JoinPredicate *pred = new (thd->mem_root) JoinPredicate;
+  pred->expr = expr;
+
+  // ----- 3. 调用 helper 构造 AccessPath -----
+  //
+  // 和 HASH_JOIN 一样，把 probe 作为 outer，build 作为 inner：
+  //   Hash join: path->hash_join().outer = probe_path;
+  //              path->hash_join().inner = build_path;
+  //
+  // 语义 join 也沿用这个约定。
+  AccessPath *path =
+      NewSemLLMJoinAccessPath(thd, /*outer=*/probe_path,
+                                    /*inner=*/build_path,
+                                    /*pred=*/pred);
+
+  // ----- 4. cost estimation -----
+  //
+  // 语义 join 的开销（LLM 调用次数、batch 大小等）来设计更合理的模型。
+  path->cost = 1e4;  // placeholder
+  path->num_output_rows_before_filter = 1000;
+
+  log_to_file("CreateSemanticJoinAccessPath: end");
+  return path;
+}
+
+
+
 // Create a hash join iterator with the given build and probe input. We will
 // move conditions from the argument "join_conditions" into two separate lists;
 // one list for equi-join conditions that will be used as normal join conditions
@@ -2298,6 +2366,229 @@ AccessPath *FinishPendingOperations(
   return path;
 }
 
+static Item_func_sem_join *AsSemJoin(Item *item) {
+  if (item == nullptr || item->type() != Item::FUNC_ITEM)
+    return nullptr;
+
+  Item_func *f = down_cast<Item_func *>(item);
+  return dynamic_cast<Item_func_sem_join *>(f);
+}
+
+static bool ItemHasSemJoin(Item *item) {
+  if (item == nullptr) return false;
+
+  // 1) 自己就是 SEM_JOIN(...)
+  if (AsSemJoin(item) != nullptr) {
+    log_to_file("ItemHasSemJoin: found Item_func_sem_join");
+    return true;
+  }
+
+  // 2) 条件组合 (AND / OR)，递归每个子项
+  if (item->type() == Item::COND_ITEM) {
+    Item_cond *c = down_cast<Item_cond *>(item);
+    List_iterator<Item> it(*c->argument_list());
+    Item *arg;
+    while ((arg = it++)) {
+      if (ItemHasSemJoin(arg)) return true;
+    }
+    return false;
+  }
+
+  // 3) 其它函数类型（包括可能包裹 SEM_JOIN 的各种函数），递归所有参数
+  if (item->type() == Item::FUNC_ITEM) {
+    Item_func *f = down_cast<Item_func *>(item);
+
+    for (uint i = 0; i < f->argument_count(); ++i) {
+      Item *arg = f->arguments()[i];
+      if (ItemHasSemJoin(arg)) return true;
+    }
+    return false;
+  }
+
+  // 4) 其它类型（列、常量等）就没有子节点了
+  return false;
+}
+
+//for test
+static bool JoinConditionsHaveSemJoin(const std::vector<Item *> &conds) {
+  {
+    std::string msg = "JoinConditionsHaveSemJoin: begin, size=";
+    msg += std::to_string(conds.size());
+    log_to_file(msg.c_str());
+  }
+
+  size_t idx = 0;
+  for (Item *item : conds) {
+    // 打每一个 cond 的指针和 type
+    {
+      std::string msg = "  cond[";
+      msg += std::to_string(idx);
+      msg += "] ptr=";
+      msg += std::to_string(reinterpret_cast<uintptr_t>(item));
+      msg += " type=";
+      msg += std::to_string(item ? item->type() : -1);
+      log_to_file(msg.c_str());
+    }
+
+    if (ItemHasSemJoin(item)) {
+      std::string msg = "JoinConditionsHaveSemJoin: cond[";
+      msg += std::to_string(idx);
+      msg += "] has sem_join => true";
+      log_to_file(msg.c_str());
+      return true;
+    }
+    idx++;
+  }
+
+  log_to_file("JoinConditionsHaveSemJoin: no sem_join => false");
+  return false;
+}
+
+static void CollectSemJoinForEdge(Item *item,
+                                  table_map left_tables,
+                                  table_map right_tables,
+                                  std::vector<Item *> *out) {
+  if (item == nullptr || out == nullptr)
+    return;
+
+  // 1) 自己就是 SEM_JOIN 的情况 —— 先不管 table_map，先把链路打通
+  if (Item_func_sem_join *sj = AsSemJoin(item)) {
+    log_to_file("CollectSemJoinForEdge: found SEM_JOIN (no table_map filter)");
+    out->push_back(sj);
+    // 不再递归这棵子树，避免重复收集
+    return;
+  }
+
+  // 2) 条件节点（AND / OR），递归 children
+  if (item->type() == Item::COND_ITEM) {
+    Item_cond *c = down_cast<Item_cond *>(item);
+    List_iterator<Item> it(*c->argument_list());
+    Item *arg;
+    while ((arg = it++)) {
+      CollectSemJoinForEdge(arg, left_tables, right_tables, out);
+    }
+    return;
+  }
+
+  // 3) 其它函数节点，也递归它的参数
+  if (item->type() == Item::FUNC_ITEM) {
+    Item_func *f = down_cast<Item_func *>(item);
+    for (uint i = 0; i < f->argument_count(); ++i) {
+      Item *arg = f->arguments()[i];
+      CollectSemJoinForEdge(arg, left_tables, right_tables, out);
+    }
+    return;
+  }
+
+  // 其它类型直接忽略
+}
+
+static void AppendSemJoinFromWhereForEdge(THD *thd,
+                                          table_map left_tables,
+                                          table_map right_tables,
+                                          std::vector<Item *> *join_conditions) {
+  if (thd == nullptr || join_conditions == nullptr) return;
+
+  Query_block *qb = thd->lex->query_block;
+  if (qb == nullptr) return;
+
+  Item *where = qb->where_cond(); 
+  if (where == nullptr) {
+    log_to_file("AppendSemJoinFromWhereForEdge: where is null");
+    return;
+  }
+
+  log_to_file("AppendSemJoinFromWhereForEdge: enter");
+  log_to_file("AppendSemJoinFromWhereForEdge: start scan WHERE");
+
+  size_t before = join_conditions->size();
+  CollectSemJoinForEdge(where, left_tables, right_tables, join_conditions);
+
+  std::string msg = "AppendSemJoinFromWhereForEdge: join_conditions size "
+                    "before=" +
+                    std::to_string(before) + " after=" +
+                    std::to_string(join_conditions->size());
+  log_to_file(msg.c_str());
+}
+
+
+
+// static bool JoinConditionsHaveSemJoin(const std::vector<Item *> &conds) {
+//   log_to_file("JoinConditionsHaveSemJoin: begin");
+//   for (Item *item : conds) {
+//     log_to_file("JoinConditionsHaveSemJoin: for");
+//     if (ItemHasSemJoin(item)) {
+//       return true;
+//     }
+//   }
+//   return false;
+// }
+
+static bool PendingConditionsHaveSemJoin(
+    const std::vector<PendingCondition> &conds) {
+  for (const PendingCondition &pc : conds) {
+    Item *item = pc.cond;  
+    if (item == nullptr) continue;
+
+    if (ItemHasSemJoin(item)) {
+      log_to_file("PendingConditionsHaveSemJoin: FOUND SEM_JOIN");
+      return true;
+    }
+  }
+  log_to_file("PendingConditionsHaveSemJoin: NO SEM_JOIN");
+  return false;
+}
+
+// pending_join_conditions 里挑出属于当前 (left_tables, right_tables) 这条边的 SEM_JOIN，
+// 追加到 join_conditions 里。
+static void AppendSemJoinCondsForEdge(
+    const std::vector<PendingCondition> &pending_join_conditions,
+    table_map left_tables,
+    table_map right_tables,
+    std::vector<Item *> *join_conditions) {
+  if (join_conditions == nullptr) return;
+
+  // 当前这条 join 边涉及到的表集合（左+右）
+  table_map edge_tables = left_tables | right_tables;
+
+  {
+    std::string msg = "AppendSemJoinCondsForEdge: pending size=" +
+                      std::to_string(pending_join_conditions.size());
+    log_to_file(msg.c_str());
+  }
+
+  for (const PendingCondition &pc : pending_join_conditions) {
+    Item *cond = pc.cond;   // 如果你的 PendingCondition 字段不是 cond，这里改成实际名字
+    if (cond == nullptr) continue;
+
+    // 深度检查这棵表达式树里是否含有 SEM_JOIN
+    if (!ItemHasSemJoin(cond))
+      continue;
+
+    // 这棵条件实际用到的表
+    table_map cond_tables = cond->used_tables();
+
+    // 如果这棵条件引用了当前 edge 之外的表（例如跨 A,B,C 三张表），跳过
+    if ((cond_tables & ~edge_tables) != 0)
+      continue;
+
+    // 要求它同时命中左表和右表，否则只是对单边的 filter，不是这条 join 的条件
+    if ((cond_tables & left_tables) == 0)  continue;
+    if ((cond_tables & right_tables) == 0) continue;
+
+    log_to_file("AppendSemJoinCondsForEdge: attach SEM_JOIN to current edge");
+    join_conditions->push_back(cond);
+  }
+
+  {
+    std::string msg = "AppendSemJoinCondsForEdge: join_conditions size after append=" +
+                      std::to_string(join_conditions->size());
+    log_to_file(msg.c_str());
+  }
+}
+
+
+
 /**
   For a given slice of the table list, build up the iterator tree corresponding
   to the tables in that slice. It handles inner and outer joins, as well as
@@ -2637,6 +2928,24 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
         vector<Item *> join_conditions;
         PickOutConditionsForTableIndex(i, &subtree_pending_join_conditions,
                                        &join_conditions);
+        // AppendSemJoinCondsForEdge(subtree_pending_join_conditions,
+        //                   left_tables, right_tables,
+        //                   &join_conditions);
+        AppendSemJoinFromWhereForEdge(thd,
+                              left_tables, right_tables,
+                              &join_conditions);
+        
+        if (JoinConditionsHaveSemJoin(join_conditions)) {
+            path = CreateSemanticJoinAccessPath(
+                thd, qep_tab,
+                /*build*/ subtree_path,
+                /*build tables*/ right_tables,
+                /*probe*/ path,
+                /*probe tables*/ left_tables,
+                join_type,
+                &join_conditions,
+                conditions_depend_on_outer_tables);
+        }
 
         if (UseBKA(qep_tab)) {
           path = CreateBKAAccessPath(thd, qep_tab->join(), path, left_tables,
@@ -2882,9 +3191,29 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
       } else if (replace_with_hash_join) {
         // The numerically lower QEP_TAB is often (if not always) the smaller
         // input, so use that as the build input.
-        if (pending_join_conditions != nullptr)
+        if (pending_join_conditions != nullptr){
           PickOutConditionsForTableIndex(i, pending_join_conditions,
                                          &join_conditions);
+          // AppendSemJoinCondsForEdge(*pending_join_conditions,
+          //                           left_tables, right_tables,
+          //                           &join_conditions);
+        }
+
+        AppendSemJoinFromWhereForEdge(thd,
+                              left_tables, right_tables,
+                              &join_conditions);
+        
+        if (JoinConditionsHaveSemJoin(join_conditions)) {
+            path = CreateSemanticJoinAccessPath(
+                thd, qep_tab,
+                /*build*/ path,
+                /*build tables*/ left_tables,
+                /*probe*/ table_path,
+                /*probe tables*/ right_tables,
+                JoinType::INNER,
+                &join_conditions,
+                conditions_depend_on_outer_tables);
+        }
         path = CreateHashJoinAccessPath(thd, qep_tab, path, left_tables,
                                         table_path, right_tables,
                                         JoinType::INNER, &join_conditions,

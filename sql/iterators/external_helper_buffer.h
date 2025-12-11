@@ -8,6 +8,7 @@
 #include "sql/iterators/helpers/gpu_hash_join.h"
 #include "sql/iterators/helpers/model_api.h"
 #include "sql/iterators/sem_helpers/sem_filter_helper.h"
+#include "sql/iterators/sem_helpers/sem_join_helper.h"
 
 // Forward declaration of the helper interface
 class ExternalHelperInterface;
@@ -99,6 +100,15 @@ ExternalHelperBufferManager<TupleType, ResultType>::ExternalHelperBufferManager(
       m_batch_size <<= 1;
     }
     m_helper = std::make_unique<semhelpers::SemFilterHelper>("sem_llm_filter");
+  }
+  else if (helper_name == "sem_llm_join") {
+    m_batch_size = std::min<size_t>(32, m_estimated_rows);
+    while (m_batch_size < 512) {
+      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
+      if (calls < 100) break;
+      m_batch_size <<= 1;
+    }
+    m_helper = std::make_unique<semhelpers::SemJoinHelper>("sem_llm_join");
   }
   else {
     log_to_file("Unknown helper: " + helper_name);

@@ -26,7 +26,9 @@
 
 #include "sql/iterators/row_iterator.h"
 #include "sql/iterators/external_helper_buffer.h"
-#include "pack_rows/pack_rows.h"
+#include "sql/join_optimizer/access_path.h"
+#include "sql/iterators/vectorized_iterators.h"
+#include "sql/pack_rows.h"
 
 // Forward decl of expression node used to compute value/predicate.
 class Item_func_semantic_filter;
@@ -37,7 +39,8 @@ public:
                     unique_ptr_destroy_only<RowIterator> source,
                     pack_rows::TableCollection tables,
                     Item *condition,
-                    size_t num_rows_estimate);
+                    size_t num_rows_estimate,
+                    AccessPath::Type impl_type);
 
   bool Init() override;
   int  Read() override;
@@ -50,6 +53,8 @@ public:
   void UnlockRow() override { m_source->UnlockRow(); }
 
 private:
+  AccessPath::Type m_impl_type;
+  
   unique_ptr_destroy_only<RowIterator> m_source;
   pack_rows::TableCollection           m_tables;
   Item*                                m_condition;

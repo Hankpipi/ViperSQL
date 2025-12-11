@@ -65,16 +65,21 @@ nlohmann::json semantic_filter_zmq_rpc_call(const std::string& name,
 }
 
 nlohmann::json semantic_join_zmq_rpc_call(const std::string& name,
-                                            const std::vector<std::string>& values,
+                                            const std::vector<semhelpers::KeyIndexPair>& values,
                                             const std::string& predicate,
                                             const std::string& type) {
                                                 
     const std::string endpoint = "tcp://127.0.0.1:5555";
     nlohmann::json request_json;
     request_json["name"] = name;
-    request_json["values"] = values;
     request_json["predicate"] = predicate;
     request_json["type"] = type;
+
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& kv : values) {
+      arr.push_back({kv.index, kv.key});
+    }
+    request_json["values"] = arr;
 
     std::string response_str = zmq_rpc_call(endpoint, request_json.dump());
 

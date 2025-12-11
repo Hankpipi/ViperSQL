@@ -399,7 +399,8 @@ SemJoinIterator::SemJoinIterator(
     JoinType join_type,
     const Mem_root_array<Item*>& extra_conditions,
     bool probe_input_batch_mode,
-    uint64_t* hash_table_generation)
+    uint64_t* hash_table_generation,
+    AccessPath::Type impl_type)
     : RowIterator(thd),
       m_build_input(std::move(build_input)),
       m_probe_input(std::move(probe_input)),
@@ -417,8 +418,9 @@ SemJoinIterator::SemJoinIterator(
       m_estimated_build_rows(estimated_build_rows),
       m_probe_input_batch_mode(probe_input_batch_mode),
       m_hash_table_generation(hash_table_generation),
+      m_impl_type(impl_type),
       // Initialize buffer manager with memory and helper name
-      m_buffer_manager(max_memory_available, estimated_build_rows, "SemJoinHelper")  
+      m_buffer_manager(max_memory_available, estimated_build_rows, GetSemImplName(impl_type))  
 {
   assert(m_build_input != nullptr);
   assert(m_probe_input != nullptr);
@@ -438,30 +440,30 @@ SemJoinIterator::SemJoinIterator(
 }
 
 // Returns extracted raw row buffer or empty vector on failure
-std::vector<uint8_t> store_row_to_buffer(const pack_rows::TableCollection& tables, size_t row_size) {
-  size_t row_size_upper_bound = row_size;
-  if (tables.has_blob_column()) {
-    row_size_upper_bound = ComputeRowSizeUpperBound(tables);
-  }
+// std::vector<uint8_t> store_row_to_buffer(const pack_rows::TableCollection& tables, size_t row_size) {
+//   size_t row_size_upper_bound = row_size;
+//   if (tables.has_blob_column()) {
+//     row_size_upper_bound = ComputeRowSizeUpperBound(tables);
+//   }
 
-  // Allocate buffer to hold the raw row bytes
-  std::vector<uint8_t> row_buffer(row_size_upper_bound);
+//   // Allocate buffer to hold the raw row bytes
+//   std::vector<uint8_t> row_buffer(row_size_upper_bound);
 
-  // Copy raw row bytes from table buffers into row_buffer
-  uchar* dest = row_buffer.data();
-  dest = StoreFromTableBuffersRaw(tables, dest);
+//   // Copy raw row bytes from table buffers into row_buffer
+//   uchar* dest = row_buffer.data();
+//   dest = StoreFromTableBuffersRaw(tables, dest);
 
-  if (dest == nullptr) {
-    // Copy failed (e.g. OOM), return empty vector
-    return std::vector<uint8_t>();
-  }
+//   if (dest == nullptr) {
+//     // Copy failed (e.g. OOM), return empty vector
+//     return std::vector<uint8_t>();
+//   }
 
-  // Resize to actual copied size
-  size_t actual_size = dest - row_buffer.data();
-  row_buffer.resize(actual_size);
+//   // Resize to actual copied size
+//   size_t actual_size = dest - row_buffer.data();
+//   row_buffer.resize(actual_size);
 
-  return row_buffer;
-}
+//   return row_buffer;
+// }
 
 bool SemJoinIterator::extract_join_key_for_row(THD* thd, const pack_rows::TableCollection& tables) {
   m_buffer.length(0);
@@ -477,6 +479,7 @@ bool SemJoinIterator::extract_join_key_for_row(THD* thd, const pack_rows::TableC
 }
 
 bool SemJoinIterator::Init() {
+  log_to_file("SemJoinIterator::Init");
   // 1. Initialize build and probe input iterators
   PrepareForRequestRowId(m_build_input_tables.tables(),
                          m_tables_to_get_rowid_for);
@@ -549,6 +552,7 @@ bool SemJoinIterator::Init() {
 }
 
 int SemJoinIterator::Read() {
+  log_to_file("SemJoinIterator::Read");
   for (;;) {
     // Always try to read one probe row each Read() call
     int ret = m_probe_input->Read();

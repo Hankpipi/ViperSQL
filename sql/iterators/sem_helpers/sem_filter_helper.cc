@@ -118,7 +118,7 @@ void SemFilterHelper::SetPredicate(std::string predicate) {
 void SemFilterHelper::SetModelName(std::string model_name) { 
     m_model_name = std::move(model_name); 
 }
-const std::string& SemFilterHelper::GetModelName() const { 
+const std::string& SemFilterHelper::GetModelName() { 
     return m_model_name; 
 }
 

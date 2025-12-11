@@ -28,6 +28,11 @@
 
 namespace semhelpers {
 
+struct KeyIndexPair {
+  std::string key; // Join key
+  size_t index;  // Index of the full row in CPU build buffer
+};
+
 /**
  * SemJoinHelper
  * A configurable semantic join helper that calls different backends
@@ -45,9 +50,9 @@ public:
   void Destroy() override;
   void SetStatus(const std::string& status) override;
 
-  void SetPredicate(std::string predicate) override;
-  void SetModelName(std::string model_name) override;
-  const std::string& GetModelName() override;
+  void SetPredicate(std::string predicate);
+  void SetModelName(std::string model_name);
+  const std::string& GetModelName();
 
 private:
 

@@ -411,6 +411,7 @@ SET(SQL_SHARED_SOURCES
   item_fb_vector_func.cc
   item_regexp_func.cc
   item_semantic_filter_func.cc
+  item_func_semantic.cc
   item_row.cc
   item_strfunc.cc
   item_subselect.cc
@@ -430,6 +431,11 @@ SET(SQL_SHARED_SOURCES
   iterators/sorting_iterator.cc
   iterators/window_iterators.cc
   iterators/helpers/model_api.cc
+  iterators/sem_helpers/sem_filter_helper.cc
+  iterators/sem_helpers/sem_join_helper.cc
+  iterators/sem_helpers/zmq_rpc_api.cc
+  iterators/sem_iterators/sem_filter_iterator.cc
+  iterators/sem_iterators/sem_join_iterator.cc
   join_optimizer/access_path.cc
   join_optimizer/build_interesting_orders.cc
   join_optimizer/common_subexpression_elimination.cc
@@ -1136,6 +1142,7 @@ IF(WITH_THRIFT)
   TARGET_LINK_LIBRARIES(thrift_gen thrift_lib)
 
   TARGET_LINK_LIBRARIES(master thrift_gen)
+
 ENDIF()
 
 SET (SLAVE_SOURCE

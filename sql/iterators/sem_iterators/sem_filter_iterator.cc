@@ -17,8 +17,36 @@
 */
 
 #include "sem_filter_iterator.h"
+#include "sql/item_func_semantic.h"
 
 #include <utility>
+
+
+// Returns extracted raw row buffer or empty vector on failure
+// std::vector<uint8_t> store_row_to_buffer(const pack_rows::TableCollection& tables, size_t row_size) {
+//   size_t row_size_upper_bound = row_size;
+//   if (tables.has_blob_column()) {
+//     row_size_upper_bound = ComputeRowSizeUpperBound(tables);
+//   }
+
+//   // Allocate buffer to hold the raw row bytes
+//   std::vector<uint8_t> row_buffer(row_size_upper_bound);
+
+//   // Copy raw row bytes from table buffers into row_buffer
+//   uchar* dest = row_buffer.data();
+//   dest = StoreFromTableBuffersRaw(tables, dest);
+
+//   if (dest == nullptr) {
+//     // Copy failed (e.g. OOM), return empty vector
+//     return std::vector<uint8_t>();
+//   }
+
+//   // Resize to actual copied size
+//   size_t actual_size = dest - row_buffer.data();
+//   row_buffer.resize(actual_size);
+
+//   return row_buffer;
+// }
 
 // External helpers you already provide elsewhere:
 // size_t ComputeRowSizeUpperBound(const pack_rows::TableCollection&);
@@ -30,14 +58,16 @@ SemFilterIterator::SemFilterIterator(THD *thd,
                                      unique_ptr_destroy_only<RowIterator> source,
                                      pack_rows::TableCollection tables,
                                      Item *condition,
-                                     size_t num_rows_estimate)
+                                     size_t num_rows_estimate,
+                                     AccessPath::Type impl_type)
   : RowIterator(thd),
     m_source(std::move(source)),
     m_tables(std::move(tables)),
     m_condition(condition),
+    m_impl_type(impl_type),
     m_buffer_manager(64LL * 1024 * 1024,  // 64 MB staging
                      num_rows_estimate,
-                     "SemFilter") {}      // tag used by helper factory
+                     GetSemImplName(impl_type)) {}      // tag used by helper factory
 
 bool SemFilterIterator::Init() {
   m_row_size = ComputeRowSizeUpperBound(m_tables);
@@ -62,7 +92,7 @@ int SemFilterIterator::Read() {
       m_rows_queue.push(std::move(row_buf));
 
       // get per-row value and current predicate
-      auto *sf = static_cast<Item_func_semantic_filter*>(m_condition);
+      auto *sf = static_cast<Item_func_sem_filter*>(m_condition);
       const std::string value = sf->compute_value();
       const std::string predicate = sf->compute_predicate(); // may be empty
 

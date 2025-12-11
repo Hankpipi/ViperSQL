@@ -77,6 +77,7 @@
 #include "sql/item_row.h"
 #include "sql/item_subselect.h"
 #include "sql/item_sum.h"  // Item_sum
+#include "sql/item_func_semantic.h"
 #include "sql/join_optimizer/bit_utils.h"
 #include "sql/join_optimizer/join_optimizer.h"
 #include "sql/mdl.h"  // MDL_SHARED_READ
@@ -112,6 +113,8 @@
 #include "sql/window.h"
 #include "template_utils.h"
 #include "thr_lock.h"  // TL_READ
+
+#include "sql/iterators/external_helper_interface.h"
 
 using std::find;
 using std::function;
@@ -1657,6 +1660,70 @@ bool Query_block::setup_wild(THD *thd) {
   return false;
 }
 
+//for test
+static Item_func_sem_join *AsSemJoin(Item *item) {
+  if (item == nullptr || item->type() != Item::FUNC_ITEM)
+    return nullptr;
+
+  Item_func *f = down_cast<Item_func *>(item);
+  return dynamic_cast<Item_func_sem_join *>(f);
+}
+
+static bool ItemHasSemJoin(Item *item) {
+  if (item == nullptr) return false;
+
+  // 1) 自己就是 SEM_JOIN(...)
+  if (AsSemJoin(item) != nullptr) {
+    log_to_file("ItemHasSemJoin: found Item_func_sem_join");
+    return true;
+  }
+
+  // 2) 条件组合 (AND / OR)，递归每个子项
+  if (item->type() == Item::COND_ITEM) {
+    Item_cond *c = down_cast<Item_cond *>(item);
+    List_iterator<Item> it(*c->argument_list());
+    Item *arg;
+    while ((arg = it++)) {
+      if (ItemHasSemJoin(arg)) return true;
+    }
+    return false;
+  }
+
+  // 3) 其它函数类型（包括可能包裹 SEM_JOIN 的各种函数），递归所有参数
+  if (item->type() == Item::FUNC_ITEM) {
+    Item_func *f = down_cast<Item_func *>(item);
+
+    for (uint i = 0; i < f->argument_count(); ++i) {
+      Item *arg = f->arguments()[i];
+      if (ItemHasSemJoin(arg)) return true;
+    }
+    return false;
+  }
+
+  // 4) 其它类型（列、常量等）就没有子节点了
+  return false;
+}
+
+
+static void RouteSemJoinPendingConditions(
+    std::vector<PendingCondition> *pending_conditions,
+    std::vector<PendingCondition> *pending_join_conditions) {
+  if (!pending_conditions || !pending_join_conditions)
+    return;
+
+  std::vector<PendingCondition> keep;
+
+  for (const PendingCondition &pc : *pending_conditions) {
+    if (ItemHasSemJoin(pc.cond)) {
+      pending_join_conditions->push_back(pc);
+    } else {
+      keep.push_back(pc);
+    }
+  }
+
+  pending_conditions->swap(keep);
+}
+
 /**
   Resolve WHERE condition and join conditions
 
@@ -1702,7 +1769,16 @@ bool Query_block::setup_conds(THD *thd) {
       return true;
 
     resolve_place = Query_block::RESOLVE_NONE;
+
+    if (ItemHasSemJoin(m_where_cond)) {
+      log_to_file("Query_block::setup_conds: WHERE has SEM_JOIN");
+    } else {
+      log_to_file("Query_block::setup_conds: WHERE has NO SEM_JOIN");
+    }
+  } else {
+    log_to_file("Query_block::setup_conds: m_where_cond is null");
   }
+  // }
 
   // Resolve all join condition clauses
   if (!m_table_nest.empty() &&

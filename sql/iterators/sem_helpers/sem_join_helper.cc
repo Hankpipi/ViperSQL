@@ -17,14 +17,14 @@
 */
 
 
-#include "sql/iterators/sem_helpers/join_helper.h"
+#include "sql/iterators/sem_helpers/sem_join_helper.h"
 
 #include <algorithm>
 #include <utility>
 #include <nlohmann/json.hpp>
 
-#include "zmq_rpc_api.h"   // nlohmann::json sem_join_zmq_rpc_call(const nlohmann::json& req);
-#include "utils/base64.h"  // std::string base64_encode(const std::string&)
+#include "zmq_rpc_api.h"   // nlohmann::json semantic_join_zmq_rpc_call(const nlohmann::json& req);
+//#include "utils/base64.h"  // std::string base64_encode(const std::string&)
 
 #include "sql_string.h"
 #include <cstddef>
@@ -40,16 +40,6 @@
 
 
 namespace semhelpers {
-
-
-struct KeyIndexPair {
-  std::string key; // Join key
-  size_t index;  // Index of the full row in CPU build buffer
-};
-
-inline void to_json(nlohmann::json& j, const KeyIndexPair& p) {
-  j = nlohmann::json::array({ static_cast<uint32_t>(p.index), base64_encode(p.key) });
-}
 
 static constexpr int MAX_KEY_SIZE = 32;
 static constexpr size_t MIN_TABLE_CAPACITY = 1 << 20;
@@ -110,7 +100,7 @@ bool SemJoinHelper::SubmitBuildBatch(const void* host_data, size_t n_rows) {
   m_expected_count = 0;
   m_future = std::async(std::launch::async, [this, name, values = std::move(values), predicate, type]() {
     try {
-      nlohmann::json resp = sem_join_zmq_rpc_call(m_model_name, values, m_predicate, type);
+      nlohmann::json resp = semantic_join_zmq_rpc_call(m_model_name, values, m_predicate, type);
       m_raw_response = resp.dump();
       // 如果服务端需要返回 build_id，可在此缓存（扩展字段）
       // if (resp.contains("build_id")) m_build_id = resp["build_id"].get<std::string>();
@@ -135,10 +125,10 @@ bool SemJoinHelper::SubmitProbeBatch(const void* host_data, size_t n_rows) {
   m_expected_count = n_rows;
 
   // 异步调用并把结果解析为 m_results（长度 = n_rows）
-  m_future = std::async(std::launch::async, [this, name, values = std::move(values), predicate, type]() {
+  m_future = std::async(std::launch::async, [this, name, values = std::move(values), predicate, type, n_rows]() {
     nlohmann::json resp;
     try {
-      resp = sem_join_zmq_rpc_call(m_model_name, values, m_predicate, type);;
+      resp = semantic_join_zmq_rpc_call(m_model_name, values, m_predicate, type);;
       m_raw_response = resp.dump();
     } catch (...) {
       m_raw_response = "{}";
@@ -183,7 +173,7 @@ bool SemJoinHelper::FetchResults(void* out_buffer, size_t* out_result_count) {
   }
 
   // PROBE
-  static_cast<std::unordered_map<size_t, std::vector<size_t>>*>(out_buffer).swap(m_results);
+  static_cast<std::unordered_map<size_t, std::vector<size_t>>*>(out_buffer)->swap(m_results);
   *out_result_count = m_results.size();
   return false;
 }

@@ -22,6 +22,10 @@
 #include "sql/iterators/composite_iterators.h"
 #include "sql/iterators/sem_helpers/sem_join_helper.h"
 #include "sql/iterators/external_helper_buffer.h"
+#include "sql/join_optimizer/access_path.h"
+#include "sql/iterators/hash_join_iterator.h" 
+#include "sql/iterators/vectorized_iterators.h"
+#include <vector>
 
 
 namespace sem_join_template_iterator {
@@ -66,7 +70,8 @@ class SemJoinIterator : public RowIterator {
     JoinType join_type,
     const Mem_root_array<Item*>& extra_conditions,
     bool probe_input_batch_mode,
-    uint64_t* hash_table_generation);
+    uint64_t* hash_table_generation,
+    AccessPath::Type impl_type);
 
   bool Init() override;
   int Read() override;
@@ -116,6 +121,8 @@ class SemJoinIterator : public RowIterator {
   ExternalHelperBufferManager<KeyIndexPair, uint32_t> m_buffer_manager;
   
   size_t m_row_size;
+
+  AccessPath::Type m_impl_type;
 
   // Extract join key from the current row of the given tables' buffers into m_buffer
   bool extract_join_key_for_row(THD* thd, const pack_rows::TableCollection& tables);

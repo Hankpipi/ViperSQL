@@ -5407,6 +5407,10 @@ SHOW_VAR com_status_vars[] = {
      (char *)offsetof(System_status_var,
                       com_stat[(uint)SQLCOM_STOP_SHARDBEATER]),
      SHOW_LONG_STATUS, SHOW_SCOPE_ALL},
+    {"Com_sync",
+      (char *)offsetof(System_status_var,
+                       com_stat[(uint)SQLCOM_SYNC]),
+      SHOW_LONG_STATUS, SHOW_SCOPE_ALL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_ALL}};
 
 LEX_CSTRING sql_statement_names[(uint)SQLCOM_END + 1];
