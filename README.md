@@ -4,6 +4,20 @@
 
 ---
 
+
+## Preparation
+
+1. **Install CUDA Driver**
+
+   Ensure that the appropriate CUDA driver is installed for your GPU to enable hardware-accelerated query processing.
+
+2. **Set OpenAI API Key**
+
+   Export your OpenAI API key as an environment variable to enable LLM-assisted query processing:
+   ```bash
+   export OPENAI_API_KEY=sk-or-v1-xxxxxxxx
+   ```
+
 ## Installation
 
 1. **Clone the Repository**
@@ -61,6 +75,28 @@
      bin/mysql -u root -p --port=3333 -h 127.0.0.1
      ```
 
+## Usage Example
+
+Semantic Filter
+```sql
+SELECT id, text 
+FROM poi WHERE
+SEMANTIC_FILTER_SINGLE_COL('Is {poi.text} a positive comment?', text) = 1;
+```
+
+Semantic Generate
+```sql
+SELECT text, 
+       semantic_generate('rewrite {poi.text} to make it formal.', text) as revised_review 
+FROM poi;
+```
+
+Semantic Join
+```sql
+SELECT content, topic
+FROM poi, topic
+WHERE SEM_JOIN( 'Is {poi.content} relevant to {topic.topic}?', poi.content, topic.topic);
+```
 
 ## Evaluation
 

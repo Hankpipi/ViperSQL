@@ -121,7 +121,7 @@ class VectorizedFilterIterator final : public RowIterator {
       m_condition(condition),
       m_buffer_manager(64LL * 1024 * 1024,
                        num_rows_estimate,
-                       "LLMFilter") {}
+                       "semantic_filter") {}
 
   bool Init() override;
 

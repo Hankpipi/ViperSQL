@@ -5,7 +5,7 @@
 #include "sql/pfs_batch_mode.h"
 #include "sql/iterators/timing_iterator.h"
 #include "sql/sql_optimizer.h"
-#include "sql/item_semantic_filter_func.h"
+#include "sql/item_semantic_func.h"
 #include "scope_guard.h"
 
 /**

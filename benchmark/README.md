@@ -24,7 +24,7 @@ deactivate
 
 The POI dataset is collected from Yelp and contains 7 million entries, each with rich textual descriptions and associated metadata. This dataset is used to evaluate LLM-driven workloads in ViperSQL.
 
-The POI dataset is available for download [here](https://drive.google.com/file/d/1Th5xxogxCinAjZeJ1Pn0ptV9jmp4JuHo/view?usp=drive_link).
+You can download the POI dataset [here](https://drive.google.com/file/d/1Th5xxogxCinAjZeJ1Pn0ptV9jmp4JuHo/view?usp=drive_link) and the Extracted Topic dataset [here](https://drive.google.com/file/d/1CyFw_iMatqUHooh2ucE-c255rZRp9g-V/view?usp=sharing).
 
 
 

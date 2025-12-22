@@ -17,6 +17,7 @@
 #pragma once
 
 #include "sql/item_func.h"
+#include "sql/item_strfunc.h"
 #include "sql/system_variables.h"
 #include "sql/iterators/external_helper_interface.h"
 
@@ -61,7 +62,15 @@ class Item_func_semantic_filter_two_col final : public Item_func_semantic_filter
   enum Functype functype() const override;
 };
 
+class Item_func_semantic_generate final : public Item_func_semantic_filter {
+ public:
+  Item_func_semantic_generate(THD *thd, const POS &pos, PT_item_list *a);
+
+  const char *func_name() const override;
+  enum Functype functype() const override;
+};
+
 bool parse_string_from_item(Item **args, uint arg_idx, String &str,
                      const char *func_name, std::string &value, std::string *field_name);
 bool parse_string_from_blob(Field *field, std::string &data);
-Item *find_semantic_filter(Item *node);
+Item *find_semantic_func(Item *node);
