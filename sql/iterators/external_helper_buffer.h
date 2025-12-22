@@ -7,6 +7,7 @@
 #include <memory>
 #include "sql/iterators/helpers/gpu_hash_join.h"
 #include "sql/iterators/helpers/model_api.h"
+#include "sql/iterators/helpers/sem_join_helper.h"
 
 // Forward declaration of the helper interface
 class ExternalHelperInterface;
@@ -77,6 +78,10 @@ ViperFlow<TupleType, ResultType>::ViperFlow(
     m_batch_size = 32;
     m_helper = std::make_unique<llmhelpers::LLMGenerateHelper>();
   }
+  else if (helper_name == "sem_llm_join") {
+    m_batch_size = 2;
+    m_helper = std::make_unique<semhelpers::SemJoinHelper>("sem_llm_join");
+  }
   else {
     log_to_file("Unknown helper: " + helper_name);
     m_helper = nullptr;
@@ -100,7 +105,7 @@ ViperFlow<TupleType, ResultType>::~ViperFlow() {
 template <typename TupleType, typename ResultType>
 bool ViperFlow<TupleType, ResultType>::FetchAndQueueResults() {
   if (!m_helper) {
-    log_to_file("GPU helper not initialized in FetchAndQueueResults");
+    log_to_file("helper not initialized in FetchAndQueueResults");
     return true;
   }
 
@@ -109,7 +114,7 @@ bool ViperFlow<TupleType, ResultType>::FetchAndQueueResults() {
   }
 
   if (m_helper->Synchronize()) {
-    log_to_file("Failed to synchronize GPU in FetchAndQueueResults");
+    log_to_file("Failed to synchronize helper in FetchAndQueueResults");
     return true;
   }
 
@@ -117,7 +122,7 @@ bool ViperFlow<TupleType, ResultType>::FetchAndQueueResults() {
   size_t results_count = 0;
 
   if (m_helper->FetchResults(results_buffer.data(), &results_count)) {
-    log_to_file("Failed to fetch results from GPU in FetchAndQueueResults");
+    log_to_file("Failed to fetch results from helper in FetchAndQueueResults");
     return true;
   }
 
@@ -133,7 +138,7 @@ bool ViperFlow<TupleType, ResultType>::FetchAndQueueResults() {
 template <typename TupleType, typename ResultType>
 bool ViperFlow<TupleType, ResultType>::PushTuple(const TupleType& tuple) {
   if (!m_helper) {
-    log_to_file("GPU helper not initialized in PushTuple");
+    log_to_file("helper not initialized in PushTuple");
     return true;
   }
 
@@ -144,7 +149,7 @@ bool ViperFlow<TupleType, ResultType>::PushTuple(const TupleType& tuple) {
       return true;
     }
     if (m_helper->SubmitBatch(m_input_buffer.data(), m_input_buffer.size())) {
-      log_to_file("Failed to submit batch to GPU in PushTuple");
+      log_to_file("Failed to submit batch to helper in PushTuple");
       return true;
     }
     m_input_buffer.clear();
@@ -157,7 +162,7 @@ bool ViperFlow<TupleType, ResultType>::PushTuple(const TupleType& tuple) {
 template <typename TupleType, typename ResultType>
 bool ViperFlow<TupleType, ResultType>::FlushBatch() {
   if (!m_helper) {
-    log_to_file("GPU helper not initialized in FlushBatch");
+    log_to_file("helper not initialized in FlushBatch");
     return true;
   }
 

@@ -38,6 +38,7 @@
 #include "sql/iterators/timing_iterator.h"
 #include "sql/iterators/window_iterators.h"
 #include "sql/iterators/vectorized_iterators.h"
+#include "sql/iterators/sem_join_iterator.h"
 #include "sql/join_optimizer/bit_utils.h"
 #include "sql/join_optimizer/cost_model.h"
 #include "sql/join_optimizer/estimate_selectivity.h"
@@ -63,6 +64,20 @@
 
 using pack_rows::TableCollection;
 using std::vector;
+
+static const char* AccessPathTypeName(AccessPath::Type t) {
+  switch (t) {
+    case AccessPath::TABLE_SCAN: return "TABLE_SCAN";
+    case AccessPath::INDEX_SCAN: return "INDEX_SCAN";
+    case AccessPath::NESTED_LOOP_JOIN: return "NESTED_LOOP_JOIN";
+    case AccessPath::HASH_JOIN: return "HASH_JOIN";
+    case AccessPath::SEM_LLM_JOIN: return "SEM_LLM_JOIN";
+    case AccessPath::SEM_TOPK_JOIN: return "SEM_TOPK_JOIN";
+    case AccessPath::SEM_EMB_JOIN: return "SEM_EMB_JOIN";
+    default: return "UNKNOWN_PATH";
+  }
+}
+
 
 AccessPath *NewSortAccessPath(THD *thd, AccessPath *child, Filesort *filesort,
                               ORDER *order, bool count_examined_rows) {
@@ -419,6 +434,8 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
     if (path->count_examined_rows && join != nullptr) {
       examined_rows = &join->examined_rows;
     }
+
+    log_to_file(AccessPathTypeName(path->type));
 
     switch (path->type) {
       case AccessPath::TABLE_SCAN: {
@@ -1228,6 +1245,91 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
                                             std::move(job.children[0]));
         break;
       }
+      case AccessPath::SEM_LLM_JOIN:
+      case AccessPath::SEM_TOPK_JOIN:
+      case AccessPath::SEM_EMB_JOIN: {
+        log_to_file("sem join");
+        auto &param = path->sem_join();
+
+        // 1) 估算行数并尽量把更小的一侧作为 build
+        double estimated_build_rows = param.inner->num_output_rows();
+        double estimated_probe_rows = param.outer->num_output_rows();
+        if (estimated_build_rows > 0 && estimated_probe_rows > 0 &&
+            estimated_probe_rows < estimated_build_rows) {
+          std::swap(param.inner, param.outer);
+          std::swap(estimated_build_rows, estimated_probe_rows);
+        }
+        if (param.inner->num_output_rows() < 0.0) {
+          // 没有有效估计，给一个偏安全的默认值
+          estimated_build_rows = 1048576.0;
+        }
+      
+        // 2) 先生成子任务
+        if (job.children.is_null()) {
+          SetupJobsForChildren(mem_root, param.outer, param.inner, join,
+                               /*inner_eligible_for_batch_mode=*/true,
+                               &job, &todo);
+          continue;
+        }
+      
+        // 3) 处理条件并提取 prompt
+        const JoinPredicate *join_predicate = param.join_predicate;
+        std::vector<Item_func_sem_join*> sem_conditions;
+        std::string prompt;
+
+        if (join_predicate != nullptr) {
+          for (Item *cond : join_predicate->expr->join_conditions) {
+              // Dynamic cast to find our specific function
+              auto* sem_func = dynamic_cast<Item_func_sem_join*>(cond);
+              if (sem_func != nullptr) {
+                sem_conditions.push_back(sem_func);
+              }
+          }
+        }
+      
+        // 4) 批模式判断
+        const bool probe_input_batch_mode =
+            eligible_for_batch_mode && ShouldEnableBatchMode(param.outer);
+      
+        // 5) 默认全部按内连接（你要求的）
+        JoinType join_type = JoinType::INNER;
+      
+        // 6) hash_table_generation（跟 hash join 同样的逻辑，允许跨 Init() 复用）
+        uint64_t *hash_table_generation =
+            (thd->lex->using_hypergraph_optimizer && path->parameter_tables == 0)
+                ? &join->hash_table_generation
+                : nullptr;
+      
+        // 7) 表集合
+        Prealloced_array<TABLE*, 4> build_tables =
+            GetUsedTables(param.inner, /*include_pruned_tables=*/true);
+        Prealloced_array<TABLE*, 4> probe_tables =
+            GetUsedTables(param.outer, /*include_pruned_tables=*/true);
+      
+        // 8) 内存上限
+        const size_t max_mem = thd->variables.join_buff_size;
+
+        // 9) 创建语义 Join 迭代器
+        iterator = NewIterator<SemJoinIterator>(
+            thd, mem_root,
+            /* build_input  */ std::move(job.children[1]),
+            /* build_tables */ build_tables,
+            /* est_build    */ estimated_build_rows,
+            /* probe_input  */ std::move(job.children[0]),
+            /* probe_tables */ probe_tables,
+            /* store_rowids */ param.store_rowids,
+            /* tables_to_get_rowid_for */ param.tables_to_get_rowid_for,
+            /* max_memory_available   */ max_mem,
+            /* sem_conditions        */ sem_conditions,
+            /* allow_spill_to_disk    */ param.allow_spill_to_disk,
+            /* join_type              */ join_type,
+            /* probe_input_batch_mode */ probe_input_batch_mode,
+            /* hash_table_generation  */ hash_table_generation,
+            /* impl_type              */ path->type);
+        break;
+      }
+
+
     }
 
     if (iterator == nullptr) {

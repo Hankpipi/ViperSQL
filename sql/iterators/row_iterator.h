@@ -25,6 +25,8 @@
 
 #include <assert.h>
 #include <string>
+#include <cstdint>
+using std::uint64_t;
 
 class Item;
 class JOIN;

@@ -106,6 +106,9 @@ struct JoinPredicate {
   // on the MEM_ROOT. Can be empty, in which case a LIMIT 1 would do.
   Item **semijoin_group = nullptr;
   int semijoin_group_size = 0;
+
+  // for semantic join
+  bool is_semantic_join = false;
 };
 
 /**
@@ -257,6 +260,16 @@ struct AccessPath {
     // Access paths that modify tables.
     DELETE_ROWS,
     UPDATE_ROWS,
+
+    // --- semantic filters ---
+    SEM_LLM_FILTER,
+    SEM_BERT_FILTER,
+    SEM_FNN_FILTER,
+
+    // --- semantic joins ---
+    SEM_LLM_JOIN,
+    SEM_TOPK_JOIN,
+    SEM_EMB_JOIN,
   } type;
 
   /// A general enum to describe the safety of a given operation.
@@ -838,6 +851,14 @@ struct AccessPath {
     assert(type == UPDATE_ROWS);
     return u.update_rows;
   }
+  auto &sem_filter() {
+    assert(type == SEM_LLM_FILTER);
+    return u.sem_filter;
+  }
+  auto &sem_join() {
+    assert(type == SEM_LLM_JOIN);
+    return u.sem_join;
+  }
 
   double num_output_rows() const { return m_num_output_rows; }
 
@@ -1207,6 +1228,27 @@ struct AccessPath {
       table_map tables_to_update;
       table_map immediate_tables;
     } update_rows;
+    /** 
+     * Semantic filter operator for LLM/BERT/FNN-based filtering logic.
+     */
+    struct {
+      AccessPath *child;
+      Item *condition;
+      AccessPath::Type impl_type;
+    } sem_filter;
+    /** 
+     * Semantic join operator for LLM/TopK/Embedding-based join processing.
+     */
+    struct {
+      AccessPath *outer;
+      AccessPath *inner;
+      const JoinPredicate *join_predicate;
+      AccessPath::Type impl_type;
+      bool store_rowids{false};
+      table_map tables_to_get_rowid_for{0};
+      bool allow_spill_to_disk{false};
+      //Item_func_sem_join *sem_join_func{nullptr};
+    } sem_join;
   } u;
 };
 static_assert(std::is_trivially_destructible<AccessPath>::value,
@@ -1229,7 +1271,78 @@ inline void CopyBasicProperties(const AccessPath &from, AccessPath *to) {
   to->ordering_state = from.ordering_state;
 }
 
+/**
+ * Semantic operator implementation types used for both filter and join.
+ * Distinguishes different semantic variants (LLM, BERT, FNN, TopK, Embedding, etc.)
+ * Mainly used to select operator name and iterator implementation.
+ */
+static inline const char* GetSemImplName(AccessPath::Type t) {
+  switch(t) {
+    case AccessPath::SEM_LLM_FILTER: return "sem_llm_filter";
+    case AccessPath::SEM_BERT_FILTER: return "sem_bert_filter";
+    case AccessPath::SEM_FNN_FILTER:   return "sem_fnn_filter";
+    case AccessPath::SEM_LLM_JOIN: return "sem_llm_join";
+    case AccessPath::SEM_TOPK_JOIN: return "sem_topk_join";
+    case AccessPath::SEM_EMB_JOIN:   return "sem_emb_join";
+    default: return "UnknownFilter";
+  }
+}
+
 // Trivial factory functions for all of the types of access paths above.
+
+inline AccessPath *NewSemLLMFilterAccessPath(THD *thd, AccessPath *child, Item *cond) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::SEM_LLM_FILTER;
+  path->sem_filter().child = child;
+  path->sem_filter().condition = cond;
+  return path;
+}
+
+inline AccessPath *NewSemBertFilterAccessPath(THD *thd, AccessPath *child, Item *cond) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::SEM_BERT_FILTER;
+  path->sem_filter().child = child;
+  path->sem_filter().condition = cond;
+  return path;
+}
+
+inline AccessPath *NewSemFnnFilterAccessPath(THD *thd, AccessPath *child, Item *cond) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::SEM_FNN_FILTER;
+  path->sem_filter().child = child;
+  path->sem_filter().condition = cond;
+  return path;
+}
+
+inline AccessPath *NewSemLLMJoinAccessPath(THD *thd, AccessPath *outer, AccessPath *inner,
+                                           const JoinPredicate *pred) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::SEM_LLM_JOIN;
+  path->sem_join().outer = outer;
+  path->sem_join().inner = inner;
+  path->sem_join().join_predicate = pred;
+  return path;
+}
+
+inline AccessPath *NewSemTopKJoinAccessPath(THD *thd, AccessPath *outer, AccessPath *inner,
+                                            const JoinPredicate *pred) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::SEM_TOPK_JOIN;
+  path->sem_join().outer = outer;
+  path->sem_join().inner = inner;
+  path->sem_join().join_predicate = pred;
+  return path;
+}
+
+inline AccessPath *NewSemEmbJoinAccessPath(THD *thd, AccessPath *outer, AccessPath *inner,
+                                           const JoinPredicate *pred) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::SEM_EMB_JOIN;
+  path->sem_join().outer = outer;
+  path->sem_join().inner = inner;
+  path->sem_join().join_predicate = pred;
+  return path;
+}
 
 inline AccessPath *NewTableScanAccessPath(THD *thd, TABLE *table,
                                           bool count_examined_rows) {

@@ -44,6 +44,7 @@
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
+#include "sql/item_func_semantic.h"  
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/bit_utils.h"
 #include "sql/join_optimizer/common_subexpression_elimination.h"
@@ -63,6 +64,8 @@
 #include "sql/table.h"
 #include "template_utils.h"
 
+#include "sql/iterators/external_helper_interface.h"
+
 using hypergraph::Hyperedge;
 using hypergraph::Hypergraph;
 using hypergraph::NodeMap;
@@ -74,6 +77,35 @@ using std::swap;
 using std::vector;
 
 namespace {
+
+// 判断 join_conditions 是否包含 SEM_JOIN(...)
+static bool EdgeHasSemanticJoin(RelationalExpression *expr) {
+  log_to_file("into EdgeHasSemanticJoin");
+  if (expr == nullptr) return false;
+
+  // 找到承载 Join 条件的数组名：
+  // 你当前版本通常是 expr->join_conditions (Mem_root_array<Item*>)
+  for (Item *cond : expr->join_conditions) {
+    if (cond == nullptr) continue;
+    if (cond->type() != Item::FUNC_ITEM) continue;
+
+    Item_func *func = static_cast<Item_func *>(cond);
+
+    // 方法 1：dynamic_cast 检测类型（推荐）
+    if (dynamic_cast<Item_func_sem_join *>(func) != nullptr) {
+      return true;
+    }
+
+    // 方法 2：按名字匹配（作为 fallback）
+    log_to_file(func->func_name());
+    if (!my_strcasecmp(system_charset_info, func->func_name(), "sem_join")) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 
 RelationalExpression *MakeRelationalExpressionFromJoinList(
     THD *thd, const mem_root_deque<Table_ref *> &join_list);
@@ -2978,6 +3010,11 @@ void AddCycleEdges(THD *thd, const Mem_root_array<Item *> &cycle_inducing_edges,
       graph->edges.push_back(JoinPredicate{
           expr, selectivity, estimated_bytes_per_row,
           /*functional_dependencies=*/0, /*functional_dependencies_idx=*/{}});
+      // JoinPredicate jp{
+      //     expr, selectivity, estimated_bytes_per_row,
+      //     /*functional_dependencies=*/0, /*functional_dependencies_idx=*/{}};
+      // jp.is_semantic_join = EdgeHasSemanticJoin(expr);
+      // graph->edges.push_back(jp);
     } else {
       // Skip this item if it is a duplicate (this can
       // happen with multiple equalities in particular).
@@ -3158,6 +3195,11 @@ void MakeJoinGraphFromRelationalExpression(THD *thd, RelationalExpression *expr,
   graph->edges.push_back(JoinPredicate{
       expr, selectivity, estimated_bytes_per_row,
       /*functional_dependencies=*/0, /*functional_dependencies_idx=*/{}});
+  // JoinPredicate jp{
+  //     expr, selectivity, estimated_bytes_per_row,
+  //     /*functional_dependencies=*/0, /*functional_dependencies_idx=*/{}};
+  // jp.is_semantic_join = EdgeHasSemanticJoin(expr);
+  // graph->edges.push_back(jp);
 }
 
 NodeMap GetNodeMapFromTableMap(
@@ -3226,6 +3268,11 @@ void AddMultipleEqualityPredicate(THD *thd, Item_equal *item_equal,
                                          estimated_bytes_per_row,
                                          /*functional_dependencies=*/0,
                                          /*functional_dependencies_idx=*/{}});
+    // JoinPredicate jp{
+    //     expr, selectivity, estimated_bytes_per_row,
+    //     /*functional_dependencies=*/0, /*functional_dependencies_idx=*/{}};
+    // jp.is_semantic_join = EdgeHasSemanticJoin(expr);
+    // graph->edges.push_back(jp);
   }
 
   Item_func_eq *eq_item = MakeEqItem(left_field, right_field, item_equal);

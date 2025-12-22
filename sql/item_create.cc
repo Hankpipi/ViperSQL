@@ -69,6 +69,8 @@
 #include "sql/item_sum.h"          // Item_sum_udf_str
 #include "sql/item_timefunc.h"     // Item_func_add_time
 #include "sql/item_xmlfunc.h"      // Item_func_xml_extractvalue
+#include "sql/item_semantic_filter_func.h"
+#include "sql/item_func_semantic.h"
 #include "sql/item_semantic_func.h"
 #include "sql/my_decimal.h"
 #include "sql/parse_location.h"
@@ -1809,6 +1811,8 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     SQL_FN_V_LIST_THD(Item_func_semantic_filter_single_col, 2, 2)},
     {"SEMANTIC_FILTER_TWO_COL", 
     SQL_FN_V_LIST_THD(Item_func_semantic_filter_two_col, 3, 3)},
+    {"SEM_JOIN", 
+    SQL_FN_V_LIST_THD(Item_func_sem_join, 3, 3)},
     {"SEMANTIC_GENERATE", 
     SQL_FN_V_LIST_THD(Item_func_semantic_generate, 2, 2)}};
 
