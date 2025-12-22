@@ -98,7 +98,7 @@
 #include "template_utils.h"
 #include "sql/iterators/external_helper_interface.h"
 #include "sql/iterators/external_helper_buffer.h"
-#include "sql/item_semantic_func.h"
+#include "sql/item_func_semantic.h"
 
 using std::vector;
 

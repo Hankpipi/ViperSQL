@@ -2411,36 +2411,14 @@ static bool ItemHasSemJoin(Item *item) {
 
 //for test
 static bool JoinConditionsHaveSemJoin(const std::vector<Item *> &conds) {
-  {
-    std::string msg = "JoinConditionsHaveSemJoin: begin, size=";
-    msg += std::to_string(conds.size());
-    log_to_file(msg.c_str());
-  }
 
   size_t idx = 0;
   for (Item *item : conds) {
-    // 打每一个 cond 的指针和 type
-    {
-      std::string msg = "  cond[";
-      msg += std::to_string(idx);
-      msg += "] ptr=";
-      msg += std::to_string(reinterpret_cast<uintptr_t>(item));
-      msg += " type=";
-      msg += std::to_string(item ? item->type() : -1);
-      log_to_file(msg.c_str());
-    }
-
     if (ItemHasSemJoin(item)) {
-      std::string msg = "JoinConditionsHaveSemJoin: cond[";
-      msg += std::to_string(idx);
-      msg += "] has sem_join => true";
-      log_to_file(msg.c_str());
       return true;
     }
     idx++;
   }
-
-  log_to_file("JoinConditionsHaveSemJoin: no sem_join => false");
   return false;
 }
 
@@ -2498,31 +2476,9 @@ static void AppendSemJoinFromWhereForEdge(THD *thd,
     return;
   }
 
-  log_to_file("AppendSemJoinFromWhereForEdge: enter");
-  log_to_file("AppendSemJoinFromWhereForEdge: start scan WHERE");
-
   size_t before = join_conditions->size();
   CollectSemJoinForEdge(where, left_tables, right_tables, join_conditions);
-
-  std::string msg = "AppendSemJoinFromWhereForEdge: join_conditions size "
-                    "before=" +
-                    std::to_string(before) + " after=" +
-                    std::to_string(join_conditions->size());
-  log_to_file(msg.c_str());
 }
-
-
-
-// static bool JoinConditionsHaveSemJoin(const std::vector<Item *> &conds) {
-//   log_to_file("JoinConditionsHaveSemJoin: begin");
-//   for (Item *item : conds) {
-//     log_to_file("JoinConditionsHaveSemJoin: for");
-//     if (ItemHasSemJoin(item)) {
-//       return true;
-//     }
-//   }
-//   return false;
-// }
 
 static bool PendingConditionsHaveSemJoin(
     const std::vector<PendingCondition> &conds) {

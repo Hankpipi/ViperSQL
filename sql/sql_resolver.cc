@@ -1769,14 +1769,6 @@ bool Query_block::setup_conds(THD *thd) {
       return true;
 
     resolve_place = Query_block::RESOLVE_NONE;
-
-    if (ItemHasSemJoin(m_where_cond)) {
-      log_to_file("Query_block::setup_conds: WHERE has SEM_JOIN");
-    } else {
-      log_to_file("Query_block::setup_conds: WHERE has NO SEM_JOIN");
-    }
-  } else {
-    log_to_file("Query_block::setup_conds: m_where_cond is null");
   }
   // }
 

@@ -27,7 +27,7 @@
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
 #include "sql/item_sum.h"
-#include "sql/item_semantic_func.h"
+#include "sql/item_func_semantic.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/bka_iterator.h"
 #include "sql/iterators/composite_iterators.h"
@@ -434,8 +434,6 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
     if (path->count_examined_rows && join != nullptr) {
       examined_rows = &join->examined_rows;
     }
-
-    log_to_file(AccessPathTypeName(path->type));
 
     switch (path->type) {
       case AccessPath::TABLE_SCAN: {
@@ -1248,7 +1246,6 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
       case AccessPath::SEM_LLM_JOIN:
       case AccessPath::SEM_TOPK_JOIN:
       case AccessPath::SEM_EMB_JOIN: {
-        log_to_file("sem join");
         auto &param = path->sem_join();
 
         // 1) 估算行数并尽量把更小的一侧作为 build

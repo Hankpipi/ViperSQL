@@ -11016,10 +11016,6 @@ function_call_keyword:
             $$= NEW_PTN Item_func_year(@$, $3);
           }
         /* === add begin: semantic functions === */
-        | SEM_FILTER_SYM '(' expr ',' expr ')'
-          {
-            $$ = new (YYTHD->mem_root) Item_func_sem_filter($3, $5);
-          }
         | SEM_JOIN_SYM '(' expr ',' expr ',' expr ')'
           {
             $$= NEW_PTN Item_func_sem_join(@$, $3, $5, $7);
