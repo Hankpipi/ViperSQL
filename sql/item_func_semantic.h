@@ -11,6 +11,7 @@
 #include "sql/item.h"
 #include "sql/item_func.h"
 #include "sql/sql_class.h"
+#include "sql/parse_tree_items.h"
 #include <string>
 #include <map>
 
@@ -44,11 +45,11 @@ private:
 class Item_func_sem_join : public Item_int_func {
 public:
   Item_func_sem_join(Item *prompt, Item *a, Item *b)
-      : Item_int_func(prompt, a, b) {  
-        std::string msg = "Item_func_sem_join::ctor this=";
-        msg += std::to_string(reinterpret_cast<uintptr_t>(this));
-        log_to_file(msg.c_str());
-      }
+    : Item_int_func(prompt, a, b) {}
+  Item_func_sem_join(THD *thd, const POS &pos, PT_item_list *item_list)
+      : Item_int_func(pos, item_list) {}
+  Item_func_sem_join(const POS &pos, Item *prompt, Item *a, Item *b)
+    : Item_int_func(pos, prompt, a, b) {}
 
   const char *func_name() const override { return "sem_join"; }
   Item_result result_type() const override { return INT_RESULT; }
@@ -64,9 +65,5 @@ private:
 
 // 解析工具函数声明
 static bool get_item_string(Item *it, String &tmp, std::string &out);
-//bool parse_string_from_blob(Field *field, std::string &data);
-//bool parse_string_from_item(Item **args, uint arg_idx, String &str,
-//                            const char *func_name, std::string &value,
-//                            std::string *field_name);
 
 #endif  // ITEM_FUNC_SEMANTIC_H
