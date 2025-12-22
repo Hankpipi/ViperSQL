@@ -20,11 +20,12 @@
 */
 
 #include "sql/iterators/composite_iterators.h"
-#include "sql/iterators/sem_helpers/sem_join_helper.h"
+#include "sql/iterators/helpers/sem_join_helper.h"
 #include "sql/iterators/external_helper_buffer.h"
 #include "sql/join_optimizer/access_path.h"
 #include "sql/iterators/hash_join_iterator.h" 
 #include "sql/iterators/vectorized_iterators.h"
+#include "sql/item_func_semantic.h"
 #include <vector>
 
 
@@ -65,10 +66,9 @@ class SemJoinIterator : public RowIterator {
     bool store_rowids,
     table_map tables_to_get_rowid_for,
     size_t max_memory_available,
-    const std::vector<HashJoinCondition>& join_conditions,
+    const std::vector<Item_func_sem_join*>& sem_conditions,
     bool allow_spill_to_disk,
     JoinType join_type,
-    const Mem_root_array<Item*>& extra_conditions,
     bool probe_input_batch_mode,
     uint64_t* hash_table_generation,
     AccessPath::Type impl_type);
@@ -103,10 +103,7 @@ class SemJoinIterator : public RowIterator {
   table_map m_tables_to_get_rowid_for;
 
   // Join conditions
-  Prealloced_array<HashJoinCondition, 4> m_join_conditions;
-
-  // Combined extra conditions
-  Item* m_extra_condition{nullptr};
+  std::vector<Item_func_sem_join*> m_sem_conditions;
 
   JoinType m_join_type;
   bool m_allow_spill_to_disk;
@@ -118,14 +115,24 @@ class SemJoinIterator : public RowIterator {
 
   // Buffer manager encapsulating input batch and result queue
   String m_buffer;
-  ExternalHelperBufferManager<KeyIndexPair, uint32_t> m_buffer_manager;
+  ViperFlow<KeyIndexPair, std::pair<size_t, size_t>> m_buffer_manager;
   
   size_t m_row_size;
 
   AccessPath::Type m_impl_type;
 
-  // Extract join key from the current row of the given tables' buffers into m_buffer
-  bool extract_join_key_for_row(THD* thd, const pack_rows::TableCollection& tables);
+  // Optimization: Track the index of the probe row currently residing in m_probe_input_tables
+  // Initialize to a sentinel value (e.g., NOT_FOUND or max size_t) in constructor.
+  size_t m_current_loaded_probe_idx;
+
+  // Track the global index corresponding to m_probe_rows_queue.front(). Starts at 0.
+  size_t m_queue_front_global_idx;
+
+  // Holds the data for the currently active probe row
+  // to ensure pointers in table->record[0] remain valid after Read() returns.
+  std::vector<uchar> m_active_probe_row;
+
+  bool extract_join_key_for_row(bool is_probe_phase);
 };
 
 #endif  // SQL_ITERATORS_EXTERNAL_HELPERS_SEMHELPERS_SEM_JOIN_ITERATOR_H_

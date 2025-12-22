@@ -7,8 +7,7 @@
 #include <memory>
 #include "sql/iterators/helpers/gpu_hash_join.h"
 #include "sql/iterators/helpers/model_api.h"
-#include "sql/iterators/sem_helpers/sem_filter_helper.h"
-#include "sql/iterators/sem_helpers/sem_join_helper.h"
+#include "sql/iterators/helpers/sem_join_helper.h"
 
 // Forward declaration of the helper interface
 class ExternalHelperInterface;
@@ -17,13 +16,13 @@ class ExternalHelperInterface;
 /// TupleType: type of tuples sent to external helper (e.g., tuples)
 /// ResultType: type of results returned from helper (e.g., matched indices)
 template <typename TupleType, typename ResultType>
-class ExternalHelperBufferManager {
+class ViperFlow {
 public:
-  ExternalHelperBufferManager(
+  ViperFlow(
       size_t max_memory_available, size_t estimated_rows, 
       const std::string& helper_name);
 
-  ~ExternalHelperBufferManager();
+  ~ViperFlow();
 
   bool PushTuple(const TupleType& tuple);
 
@@ -54,7 +53,7 @@ private:
 // Implementation
 
 template <typename TupleType, typename ResultType>
-ExternalHelperBufferManager<TupleType, ResultType>::ExternalHelperBufferManager(
+ViperFlow<TupleType, ResultType>::ViperFlow(
     size_t max_memory_available, size_t estimated_rows, const std::string& helper_name)
     : m_max_memory_bytes(max_memory_available),
       m_estimated_rows(estimated_rows),
@@ -74,40 +73,13 @@ ExternalHelperBufferManager<TupleType, ResultType>::ExternalHelperBufferManager(
     }
     m_helper = std::make_unique<llmhelpers::LLMFilterHelper>();
   }
-  else if (helper_name == "SemFnnFilter") {
-    m_batch_size = std::min<size_t>(32, m_estimated_rows);
-    while (m_batch_size < 512) {
-      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
-      if (calls < 100) break;
-      m_batch_size <<= 1;
-    }
-    m_helper = std::make_unique<semhelpers::SemFilterHelper>("sem_fnn_filter");
-  }
-  else if (helper_name == "SemBertFilter") {
-    m_batch_size = std::min<size_t>(32, m_estimated_rows);
-    while (m_batch_size < 512) {
-      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
-      if (calls < 100) break;
-      m_batch_size <<= 1;
-    }
-    m_helper = std::make_unique<semhelpers::SemFilterHelper>("sem_bert_filter");
-  }
-  else if (helper_name == "SemLLMFilter") {
-    m_batch_size = std::min<size_t>(32, m_estimated_rows);
-    while (m_batch_size < 512) {
-      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
-      if (calls < 100) break;
-      m_batch_size <<= 1;
-    }
-    m_helper = std::make_unique<semhelpers::SemFilterHelper>("sem_llm_filter");
+  else if (helper_name == "semantic_generate") {
+    // Batch-size policy same as LLMFilter for now
+    m_batch_size = 32;
+    m_helper = std::make_unique<llmhelpers::LLMGenerateHelper>();
   }
   else if (helper_name == "sem_llm_join") {
-    m_batch_size = std::min<size_t>(32, m_estimated_rows);
-    while (m_batch_size < 512) {
-      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
-      if (calls < 100) break;
-      m_batch_size <<= 1;
-    }
+    m_batch_size = 2;
     m_helper = std::make_unique<semhelpers::SemJoinHelper>("sem_llm_join");
   }
   else {
@@ -124,14 +96,14 @@ ExternalHelperBufferManager<TupleType, ResultType>::ExternalHelperBufferManager(
 }
 
 template <typename TupleType, typename ResultType>
-ExternalHelperBufferManager<TupleType, ResultType>::~ExternalHelperBufferManager() {
+ViperFlow<TupleType, ResultType>::~ViperFlow() {
   if (m_helper) {
     m_helper->Destroy();
   }
 }
 
 template <typename TupleType, typename ResultType>
-bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() {
+bool ViperFlow<TupleType, ResultType>::FetchAndQueueResults() {
   if (!m_helper) {
     log_to_file("helper not initialized in FetchAndQueueResults");
     return true;
@@ -164,7 +136,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::FetchAndQueueResults() 
 }
 
 template <typename TupleType, typename ResultType>
-bool ExternalHelperBufferManager<TupleType, ResultType>::PushTuple(const TupleType& tuple) {
+bool ViperFlow<TupleType, ResultType>::PushTuple(const TupleType& tuple) {
   if (!m_helper) {
     log_to_file("helper not initialized in PushTuple");
     return true;
@@ -188,7 +160,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::PushTuple(const TupleTy
 }
 
 template <typename TupleType, typename ResultType>
-bool ExternalHelperBufferManager<TupleType, ResultType>::FlushBatch() {
+bool ViperFlow<TupleType, ResultType>::FlushBatch() {
   if (!m_helper) {
     log_to_file("helper not initialized in FlushBatch");
     return true;
@@ -214,7 +186,7 @@ bool ExternalHelperBufferManager<TupleType, ResultType>::FlushBatch() {
 }
 
 template <typename TupleType, typename ResultType>
-std::unique_ptr<ResultType> ExternalHelperBufferManager<TupleType, ResultType>::PopResult() {
+std::unique_ptr<ResultType> ViperFlow<TupleType, ResultType>::PopResult() {
   if (m_result_queue.empty()) {
     if (FetchAndQueueResults()) {
       return nullptr;
@@ -230,14 +202,14 @@ std::unique_ptr<ResultType> ExternalHelperBufferManager<TupleType, ResultType>::
 }
 
 template <typename TupleType, typename ResultType>
-void ExternalHelperBufferManager<TupleType, ResultType>::SetStatus(const std::string& status) {
+void ViperFlow<TupleType, ResultType>::SetStatus(const std::string& status) {
   if (m_helper) {
     m_helper->SetStatus(status);
   }
 }
 
 template <typename TupleType, typename ResultType>
-bool ExternalHelperBufferManager<TupleType, ResultType>::IsExternalCallRunning() const {
+bool ViperFlow<TupleType, ResultType>::IsExternalCallRunning() const {
   return m_external_call_running;
 }
 

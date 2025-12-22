@@ -70,6 +70,7 @@
 #include "sql/item_timefunc.h"     // Item_func_add_time
 #include "sql/item_xmlfunc.h"      // Item_func_xml_extractvalue
 #include "sql/item_semantic_filter_func.h"
+#include "sql/item_func_semantic.h"
 #include "sql/my_decimal.h"
 #include "sql/parse_location.h"
 #include "sql/parse_tree_helpers.h"  // PT_item_list
@@ -1808,7 +1809,10 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"SEMANTIC_FILTER_SINGLE_COL", 
     SQL_FN_V_LIST_THD(Item_func_semantic_filter_single_col, 2, 2)},
     {"SEMANTIC_FILTER_TWO_COL", 
-    SQL_FN_V_LIST_THD(Item_func_semantic_filter_two_col, 3, 3)}};
+    SQL_FN_V_LIST_THD(Item_func_semantic_filter_two_col, 3, 3)},
+    {"SEM_JOIN", 
+    SQL_FN_V_LIST_THD(Item_func_sem_join, 3, 3)}
+    };
 
 using Native_functions_hash = std::unordered_map<std::string, Create_func *>;
 static const Native_functions_hash *native_functions_hash;

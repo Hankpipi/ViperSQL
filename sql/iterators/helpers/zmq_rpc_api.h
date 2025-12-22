@@ -22,7 +22,7 @@
 
 #include <string>
 #include <nlohmann/json.hpp>
-#include "sql/iterators/sem_helpers/sem_join_helper.h"
+#include "sql/iterators/helpers/sem_join_helper.h"
 
 namespace zmq { class context_t; }
 

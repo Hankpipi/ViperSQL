@@ -431,11 +431,9 @@ SET(SQL_SHARED_SOURCES
   iterators/sorting_iterator.cc
   iterators/window_iterators.cc
   iterators/helpers/model_api.cc
-  iterators/sem_helpers/sem_filter_helper.cc
-  iterators/sem_helpers/sem_join_helper.cc
-  iterators/sem_helpers/zmq_rpc_api.cc
-  iterators/sem_iterators/sem_filter_iterator.cc
-  iterators/sem_iterators/sem_join_iterator.cc
+  iterators/helpers/sem_join_helper.cc
+  iterators/helpers/zmq_rpc_api.cc
+  iterators/sem_join_iterator.cc
   join_optimizer/access_path.cc
   join_optimizer/build_interesting_orders.cc
   join_optimizer/common_subexpression_elimination.cc

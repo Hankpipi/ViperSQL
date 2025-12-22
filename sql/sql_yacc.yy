@@ -11022,7 +11022,7 @@ function_call_keyword:
           }
         | SEM_JOIN_SYM '(' expr ',' expr ',' expr ')'
           {
-            $$ = new (YYTHD->mem_root) Item_func_sem_join($3, $5, $7);
+            $$= NEW_PTN Item_func_sem_join(@$, $3, $5, $7);
           }
         /* === add end === */
         ;

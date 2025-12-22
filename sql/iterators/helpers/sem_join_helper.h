@@ -64,7 +64,7 @@ private:
   size_t               m_capacity{0};    // max batch size
   size_t               m_expected_count{0};
   std::string          m_raw_response;   // raw JSON (stringified) from server
-  std::unordered_map<size_t, std::vector<size_t>> m_results;        // parsed int pair results
+  std::vector<std::pair<size_t, size_t>> m_results;        // parsed int pair results
   std::future<void>    m_future;
   std::string          m_status;
 };

@@ -3214,10 +3214,12 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
                 &join_conditions,
                 conditions_depend_on_outer_tables);
         }
-        path = CreateHashJoinAccessPath(thd, qep_tab, path, left_tables,
+        else {
+          path = CreateHashJoinAccessPath(thd, qep_tab, path, left_tables,
                                         table_path, right_tables,
                                         JoinType::INNER, &join_conditions,
                                         conditions_depend_on_outer_tables);
+        }
 
         // Attach any remaining non-equi-join conditions as a filter after the
         // join.

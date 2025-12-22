@@ -1,60 +1,18 @@
-/*
-   Copyright (c) 2025, Songsong Mo
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; version 2 of the License.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the
-   Free Software Foundation, Inc., 59 Temple Place, Suite 330,
-   Boston, MA  02111-1307  USA
-*/
-
-
-#include "sql/iterators/sem_helpers/sem_join_helper.h"
+#include "sql/iterators/helpers/sem_join_helper.h"
 
 #include <algorithm>
 #include <utility>
+#include <vector>
+#include <future>
 #include <nlohmann/json.hpp>
 
-#include "zmq_rpc_api.h"   // nlohmann::json semantic_join_zmq_rpc_call(const nlohmann::json& req);
-//#include "utils/base64.h"  // std::string base64_encode(const std::string&)
-
+#include "zmq_rpc_api.h"
 #include "sql_string.h"
-#include <cstddef>
-#include <cstdint>
-#include <string>
-#include <vector>
-
-
-#ifndef SEMJOIN_NOT_FOUND_SENTINEL
-#define SEMJOIN_NOT_FOUND_SENTINEL 0xFFFFFFFFu
-#endif
-
-
 
 namespace semhelpers {
 
-static constexpr int MAX_KEY_SIZE = 32;
-static constexpr size_t MIN_TABLE_CAPACITY = 1 << 20;
-static constexpr size_t MAX_TABLE_CAPACITY = 1 << 27;
-static constexpr uint32_t NOT_FOUND = 0xFFFFFFFF;
-
-struct PackedKey {
-  uint8_t data[MAX_KEY_SIZE];
-};
-
-struct HashEntry {
-  PackedKey key;
-  uint32_t index;
-};
-
+// Ensure this matches the definition in your Iterator/BufferManager
+using ResultPair = std::pair<size_t, size_t>;
 
 SemJoinHelper::SemJoinHelper(std::string model_name)
     : m_model_name(std::move(model_name)) {
@@ -70,7 +28,7 @@ bool SemJoinHelper::Init(size_t capacity) {
   m_capacity = capacity;
   m_expected_count = 0;
   m_raw_response.clear();
-  m_results.clear();
+  m_results.clear(); // This is now vector<pair<size_t, size_t>>
   m_status.clear();
   return false;
 }
@@ -87,23 +45,23 @@ bool SemJoinHelper::SubmitBatch(const void* host_data, size_t n_rows) {
 }
 
 bool SemJoinHelper::SubmitBuildBatch(const void* host_data, size_t n_rows) {
-
   const KeyIndexPair* pairs = static_cast<const KeyIndexPair*>(host_data);
-
   std::vector<KeyIndexPair> values(pairs, pairs + n_rows);
 
   const std::string name = m_model_name;
   const std::string predicate = m_predicate; 
   const std::string type = "build";
 
-  // build 阶段不返回匹配，仅作为 barrier；异步发起便于不阻塞
+  // Build phase acts as an upload barrier. No results returned immediately.
   m_expected_count = 0;
+  
   m_future = std::async(std::launch::async, [this, name, values = std::move(values), predicate, type]() {
     try {
-      nlohmann::json resp = semantic_join_zmq_rpc_call(m_model_name, values, m_predicate, type);
+      nlohmann::json resp = semantic_join_zmq_rpc_call(name, values, predicate, type);
       m_raw_response = resp.dump();
-      // 如果服务端需要返回 build_id，可在此缓存（扩展字段）
-      // if (resp.contains("build_id")) m_build_id = resp["build_id"].get<std::string>();
+    } catch (const std::exception& e) {
+      m_raw_response = "{}";
+      log_to_file("SemJoinHelper::SubmitBuildBatch Exception: " + std::string(e.what()));
     } catch (...) {
       m_raw_response = "{}";
     }
@@ -113,49 +71,67 @@ bool SemJoinHelper::SubmitBuildBatch(const void* host_data, size_t n_rows) {
 }
 
 bool SemJoinHelper::SubmitProbeBatch(const void* host_data, size_t n_rows) {
-
   const KeyIndexPair* pairs = static_cast<const KeyIndexPair*>(host_data);
-
   std::vector<KeyIndexPair> values(pairs, pairs + n_rows);
 
   const std::string name = m_model_name;
   const std::string predicate = m_predicate; 
   const std::string type = "probe";
 
+  // In Probe phase, we expect results corresponding to these rows
   m_expected_count = n_rows;
 
-  // 异步调用并把结果解析为 m_results（长度 = n_rows）
-  m_future = std::async(std::launch::async, [this, name, values = std::move(values), predicate, type, n_rows]() {
+  m_future = std::async(std::launch::async, [this, name, values = std::move(values), predicate, type]() {
     nlohmann::json resp;
     try {
-      resp = semantic_join_zmq_rpc_call(m_model_name, values, m_predicate, type);;
-      m_raw_response = resp.dump();
+      resp = semantic_join_zmq_rpc_call(name, values, predicate, type);
+      // Optional: Store raw response for debug
+      // m_raw_response = resp.dump(); 
+    } catch (const std::exception& e) {
+        log_to_file("SemJoinHelper::SubmitProbeBatch RPC Exception: " + std::string(e.what()));
+        return;
     } catch (...) {
-      m_raw_response = "{}";
+        return;
     }
 
-    std::unordered_map<size_t, std::vector<size_t>> results(n_rows);
+    // Temporary vector to hold flattened results
+    std::vector<ResultPair> temp_results;
+
+    // Parse JSON: Expecting {"values": { "probe_idx": [build_idx1, build_idx2], ... }}
     if (resp.is_object() && resp.contains("values") && resp["values"].is_object()) {
       const auto& mp = resp["values"];
+      
       for (auto it = mp.begin(); it != mp.end(); ++it) {
         size_t pid = 0;
         try {
+          // Key is the Probe Index (passed as string in JSON)
           pid = static_cast<size_t>(std::stoull(it.key()));
         } catch (...) {
-          continue; // 键非数字，跳过
+          continue; // Key not numeric
         }
-        if (!it.value().is_array()) continue; // 值不是列表，跳过
 
-        auto& bids = results[pid];
+        if (!it.value().is_array()) continue;
 
+        // Iterate over the list of matched Build Indices
         for (const auto& b : it.value()) {
-
-          size_t bid = 0; try { bid = b.get<size_t>(); } catch (...) {}
-          if (bid > 0) bids.push_back(bid);
+          size_t bid = 0; 
+          try { 
+              bid = b.get<size_t>(); 
+          } catch (...) { continue; }
+          
+          // Add the pair (ProbeIdx, BuildIdx)
+          temp_results.emplace_back(pid, bid);
         }
       }
     }
-    m_results.swap(results);
+
+    // CRITICAL: Sort results by Probe Index (first) then Build Index (second).
+    std::sort(temp_results.begin(), temp_results.end());
+
+    // Swap into the member variable for FetchResults to pick up
+    // Note: We use a mutex if FetchResults can be called concurrently, 
+    // but BufferManager usually waits for Synchronize() first.
+    m_results.swap(temp_results);
   });
 
   return false;
@@ -164,17 +140,34 @@ bool SemJoinHelper::SubmitProbeBatch(const void* host_data, size_t n_rows) {
 bool SemJoinHelper::FetchResults(void* out_buffer, size_t* out_result_count) {
   if (!out_buffer || !out_result_count) return true;
 
+  // Ensure async task is done
   if (m_future.valid()) m_future.wait();
 
   if (m_status == "BUILD") {
-    // 作为 barrier：不返回匹配
+    // Build phase returns nothing
     *out_result_count = 0;
     return false;
   }
 
-  // PROBE
-  static_cast<std::unordered_map<size_t, std::vector<size_t>>*>(out_buffer)->swap(m_results);
+  // PROBE Phase
+  if (m_results.empty()) {
+      *out_result_count = 0;
+      return false;
+  }
+
+  // 1. Cast output buffer to the expected Pair type
+  ResultPair* buffer_ptr = static_cast<ResultPair*>(out_buffer);
+
+  // 2. Copy data (Flat copy)
+  // Since std::vector stores data contiguously, we can technically use memcpy,
+  // but std::copy is safer for types.
+  std::copy(m_results.begin(), m_results.end(), buffer_ptr);
+
   *out_result_count = m_results.size();
+  
+  // 3. Clear results to avoid re-reading
+  m_results.clear();
+
   return false;
 }
 
@@ -209,4 +202,3 @@ const std::string& SemJoinHelper::GetModelName() {
 }
 
 } // namespace semhelpers
-

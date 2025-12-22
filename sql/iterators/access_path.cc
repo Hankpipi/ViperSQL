@@ -1245,6 +1245,46 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
                                             std::move(job.children[0]));
         break;
       }
+      // =====================
+      // Semantic FILTER cases
+      // =====================
+      case AccessPath::SEM_LLM_FILTER:
+      case AccessPath::SEM_BERT_FILTER:
+      case AccessPath::SEM_FNN_FILTER: {
+        const auto &param = path->sem_filter();
+
+        if (job.children.is_null()) {
+          SetupJobsForChildren(mem_root, param.child, join,
+                               eligible_for_batch_mode, &job, &todo);
+          continue;
+        }
+
+        ha_rows rows_est = param.child->num_output_rows() < 0.0
+                               ? HA_POS_ERROR
+                               : static_cast<ha_rows>(
+                                     lrint(param.child->num_output_rows()));
+
+        Prealloced_array<TABLE*, 4> tables =
+            GetUsedTables(param.child, /*include_pruned_tables=*/true);
+
+        iterator = NewIterator<SemFilterIterator>(
+            thd,
+            mem_root,
+            std::move(job.children[0]),
+            TableCollection(tables,
+                            /*store_rowids=*/false,
+                            /*tables_to_get_rowid_for=*/0,
+                            GetNullableEqRefTables(param.child)),
+            param.condition,
+            (rows_est == HA_POS_ERROR ? size_t{0}
+                                      : static_cast<size_t>(rows_est)),
+            path->type);  // impl_type
+
+        break;
+      }
+      // ===================
+      // Semantic JOIN cases
+      // ===================
       case AccessPath::SEM_LLM_JOIN:
       case AccessPath::SEM_TOPK_JOIN:
       case AccessPath::SEM_EMB_JOIN: {
