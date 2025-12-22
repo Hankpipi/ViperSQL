@@ -69,12 +69,9 @@
 #include "sql/item_sum.h"          // Item_sum_udf_str
 #include "sql/item_timefunc.h"     // Item_func_add_time
 #include "sql/item_xmlfunc.h"      // Item_func_xml_extractvalue
-<<<<<<< HEAD
 #include "sql/item_semantic_filter_func.h"
 #include "sql/item_func_semantic.h"
-=======
 #include "sql/item_semantic_func.h"
->>>>>>> upstream/main
 #include "sql/my_decimal.h"
 #include "sql/parse_location.h"
 #include "sql/parse_tree_helpers.h"  // PT_item_list
