@@ -46,6 +46,8 @@ public:
   bool Init(size_t capacity) override;
   bool SubmitBatch(const void* host_data, size_t n_rows) override;
   bool FetchResults(void* out_buffer, size_t* out_result_count) override;
+  bool SubmitBuildDone();
+  bool SubmitReset();
   bool Synchronize() override;
   void Destroy() override;
   void SetStatus(const std::string& status) override;
@@ -53,6 +55,8 @@ public:
   void SetPredicate(std::string predicate);
   void SetModelName(std::string model_name);
   const std::string& GetModelName();
+  void SetJoinId(std::string join_id);
+  const std::string& GetJoinId() const;
 
 private:
 
@@ -67,6 +71,7 @@ private:
   std::vector<std::pair<size_t, size_t>> m_results;        // parsed int pair results
   std::future<void>    m_future;
   std::string          m_status;
+  std::string          m_join_id;
 };
 
 }  // namespace semhelpers

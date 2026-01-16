@@ -38,13 +38,27 @@ public:
   /// Log status messages
   void SetStatus(const std::string& status) override;
 
-private:
+protected:
   size_t                    m_capacity;       ///< batch size
   size_t                    m_expected_count; ///< last submit question count
   std::vector<std::string>  m_prompts;        ///< stored prompts
   std::string               m_raw_response;   ///< full LLM output
   std::vector<uint8_t>      m_results;        ///< parsed true/false per prompt
   std::future<void>         m_future;         ///< async handle for the LLM call
+};
+
+/**
+  LLMTwoColFilterHelper
+  Dedicated helper for SEMANTIC_FILTER_TWO_COL operations.
+  Focuses on comparing two text segments (Consistency, Relevance, Equality).
+  Inherits generic fetch/sync logic from LLMFilterHelper.
+*/
+class LLMTwoColFilterHelper : public LLMFilterHelper {
+public:
+  using LLMFilterHelper::LLMFilterHelper; // Inherit constructor
+  
+  /// Specialized batch submission for two-column comparison tasks
+  bool SubmitBatch(const void* host_data, size_t n_rows) override;
 };
 
 /**

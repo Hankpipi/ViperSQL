@@ -19,7 +19,7 @@ static inline std::string sanitize_for_batch(const std::string &raw) {
     unsigned char uc = static_cast<unsigned char>(c);
     // keep ':' so the model sees the identifier/text boundary
     if (std::isalpha(uc) || std::isdigit(uc) ||
-        c == ',' || c == '.' || c == ' ' || c == '-' || c == '_' || c == ':') {
+        c == ',' || c == '.' || c == ' ' || c == '-' || c == '_' || c == ':' || c == '\n') {
       out.push_back(c);
     }
   }
@@ -108,7 +108,7 @@ static std::string call_openai_api(const std::string& prompt,
   size_t approx_in = prompt.size() / 4;
   size_t total = approx_in + expected_output_tokens;
   const char* model =
-      (total <= 12000) ? "openai/gpt-4o-mini" : "openai/gpt-4.1-nano";
+      (total <= 12000) ? "gpt-4o-mini" : "gpt-4.1-nano";
 
   CURL* curl = curl_easy_init();
   std::string readBuffer;
@@ -125,7 +125,8 @@ static std::string call_openai_api(const std::string& prompt,
   headers = curl_slist_append(headers, ("Authorization: Bearer " + api_key).c_str());
   headers = curl_slist_append(headers, "Content-Type: application/json");
 
-  curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/chat/completions");
+  // curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/chat/completions");
+  curl_easy_setopt(curl, CURLOPT_URL, "https://api.openai.com/v1/chat/completions");
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
   curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload_str.c_str());
   curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, payload_str.size());
@@ -165,20 +166,28 @@ bool LLMFilterHelper::SubmitBatch(const void* host_data, size_t n_rows) {
   size_t expected_output_tokens = std::max<size_t>(n_rows, 64);
 
   std::ostringstream oss;
-  oss << "You are a strict classifier.\n"
-      << "You will receive " << n_rows << " INPUTs labeled Input(1.." << n_rows << "). "
-      << "For each input, decide True=1 or False=0.\n"
-      << "OUTPUT FORMAT:\n"
-      << "Return ONLY one concatenated string of exactly " << n_rows
-      << " characters consisting solely of digits '0' and '1' in order, "
-      << "no spaces, no quotes, no newlines, no comments.\n\n"
-      << "INPUTS:\n";
+  oss << "You are a Semantic Logic Gate.\n"
+      << "Task: Evaluate " << n_rows << " text inputs based on the question asked in each input.\n"
+      << "Input Handling: Ignore numeric noise and focus on the meaning and sentiment.\n"
+      << "Output Logic:\n"
+      << " - Return '1' (TRUE) if the condition is met, the answer is Yes.\n"
+      << " - Return '0' (FALSE/NOT SURE) if the condition is NOT met, the answer is No, or you are not sure.\n\n";
 
+  oss << "--- EXAMPLES ---\n"
+      << "Input(1): 'Is [apple] relevant to [cars]?'\n"
+      << "Input(2): 'Is [The service is awesome here] a positive comment?'\n"
+      << "Input(3): 'Is [The environment is terrible] a positive comment?'\n"
+      << "Output: 010\n"
+      << "--- END EXAMPLES ---\n\n";
+
+  oss << "--- START BATCH ---\n";
   for (size_t i = 0; i < n_rows; ++i) {
     std::string filtered = sanitize_for_batch(m_prompts[i]);
     oss << "Input(" << (i + 1) << "): " << filtered << "\n";
   }
-  oss << "\nReturn the concatenated 0/1 string now.";
+
+  oss << "\nCOMMAND: Return ONLY the " << n_rows 
+      << "-character string of '0's and '1's. Do not output labels or explanations.";
 
   std::string combined = oss.str();
 
@@ -241,6 +250,84 @@ void LLMFilterHelper::SetStatus(const std::string& status) {
 
 LLMGenerateHelper::LLMGenerateHelper() : m_capacity(0), m_expected_count(0) {}
 LLMGenerateHelper::~LLMGenerateHelper() { Destroy(); }
+
+bool LLMTwoColFilterHelper::SubmitBatch(const void* host_data, size_t n_rows) {
+  m_expected_count = n_rows;
+  const std::string* host_prompts = static_cast<const std::string*>(host_data);
+  m_prompts.assign(host_prompts, host_prompts + n_rows);
+
+  size_t expected_output_tokens = std::max<size_t>(n_rows, 64);
+  std::ostringstream oss;
+
+  oss << "You are a Semantic Logic Evaluator.\n"
+      << "Task: For each input, answer the 'Question' (Line 1) using the 'Data' (subsequent lines).\n"
+      << "PROTOCOL:\n"
+      << " 1. Identify the specific Question (e.g., 'Same Sentiment?', 'Is Relevant?').\n"
+      << " 2. Read the Key: Value data pairs. Ignore the Key names (e.g., 'sub.r1_text'); focus on the Values.\n"
+      << " 3. Determine if the Data satisfies the Question.\n\n"
+      
+      << "OUTPUT LOGIC:\n"
+      << " - Return '1' (YES) if the answer is clearly Yes.\n"
+      << " - Return '0' (NO) if the answer is No, or if the data contradicts the question.\n\n";
+
+  oss << "--- EXAMPLES ---\n"
+
+      << "Input(1):\n"
+      << "Question: Do col1 and col2 express the same sentiment?\n"
+      << "Data: col1: I love this movie! col2: It was a fantastic experience.\n"
+      << "Output: 1\n\n"
+
+      << "Input(2):\n"
+      << "Question: Do col1 and col2 express the same sentiment?\n"
+      << "Data: col1: Best purchase ever. col2: It broke after one day, terrible.\n"
+      << "Output: 0\n\n"
+
+      << "Input(3):\n"
+      << "Question: Is the text relevant to cars?\n"
+      << "Data: review: The engine noise is very loud.\n"
+      << "Output: 1\n"
+      << "--- END EXAMPLES ---\n\n";
+
+  oss << "--- START BATCH ---\n";
+  for (size_t i = 0; i < n_rows; ++i) {
+    const std::string& raw = m_prompts[i];
+
+    std::string question, data;
+    size_t newline_pos = raw.find('\n');
+    if (newline_pos != std::string::npos) {
+      question = raw.substr(0, newline_pos);
+      data = raw.substr(newline_pos + 1);
+    } else {
+      question = raw;
+      data = "";
+    }
+
+    std::string clean_data = sanitize_for_batch(data);
+
+    oss << "Input(" << (i + 1) << "):\n"
+        << "Question: " << question << "\n"
+        << "Data: " << clean_data << "\n\n";
+  }
+
+  oss << "COMMAND: Return ONLY the " << n_rows 
+      << "-character binary string (0 or 1).";
+
+  std::string combined = oss.str();
+
+  // 4. LAUNCH ASYNC
+  const std::string api_key = get_openai_api_key();
+  if (api_key.empty()) {
+    log_to_file("LLMTwoColFilterHelper: missing OPENAI_API_KEY");
+    return true; 
+  }
+
+  m_future = std::async(std::launch::async,
+                        [this, combined, api_key, expected_output_tokens]() {
+    m_raw_response = call_openai_api(combined, api_key, expected_output_tokens);
+  });
+
+  return false;
+}
 
 bool LLMGenerateHelper::Init(size_t capacity) {
   m_capacity = capacity;

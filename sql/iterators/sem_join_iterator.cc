@@ -80,6 +80,54 @@ SemJoinIterator::SemJoinIterator(
       // [TODO] send prompt to ViperFlow
       log_to_file("SemJoinIterator: Prompt set to: " + p);
   }
+  if (!m_sem_conditions.empty()) {
+    Item_func_sem_join* sem_func = m_sem_conditions[0];
+
+    // 1. Find which argument belongs to the Build Tables
+    m_build_item = resolve_item_for_tables(sem_func, m_build_input_tables);
+    
+    // 2. Find which argument belongs to the Probe Tables
+    m_probe_item = resolve_item_for_tables(sem_func, m_probe_input_tables);
+
+    // Fallback/Safety: If resolution failed (e.g. complex expression), 
+    // try to deduce: if we found Build, the other is Probe.
+    if (m_build_item && !m_probe_item) {
+          m_probe_item = (m_build_item == sem_func->arguments()[1]) 
+                        ? sem_func->arguments()[2] 
+                        : sem_func->arguments()[1];
+    } else if (!m_build_item && m_probe_item) {
+          m_build_item = (m_probe_item == sem_func->arguments()[1]) 
+                        ? sem_func->arguments()[2] 
+                        : sem_func->arguments()[1];
+    }
+
+    if (!m_build_item || !m_probe_item) {
+        log_to_file("SemJoinIterator Error: Could not map arguments to Build/Probe tables!");
+    }
+  }
+}
+
+Item* SemJoinIterator::resolve_item_for_tables(Item_func_sem_join* sem_func, const pack_rows::TableCollection& tables) {
+    // We only care about args[1] and args[2]. Arg[0] is the prompt.
+    Item* candidates[] = { sem_func->arguments()[1], sem_func->arguments()[2] };
+
+    for (Item* item : candidates) {
+      if (item->type() == Item::FIELD_ITEM) {
+          Item_field* field_item = static_cast<Item_field*>(item);
+          for (size_t i = 0; i < tables.tables().size(); ++i) {
+            if (tables.tables()[i].table == field_item->field->table) {
+              return item;
+            }
+          }
+      }
+    }
+    return nullptr;
+}
+
+SemJoinIterator::~SemJoinIterator() {
+  log_to_file("SemJoinIterator::~SemJoinIterator");
+
+  (void)m_buffer_manager.FlushControl("RESET");
 }
 
 bool SemJoinIterator::extract_join_key_for_row(bool is_probe_phase) {
@@ -90,8 +138,7 @@ bool SemJoinIterator::extract_join_key_for_row(bool is_probe_phase) {
   }
 
   Item_func_sem_join* sem_func = m_sem_conditions[0];
-  Item* item_to_read = is_probe_phase ? sem_func->arguments()[1] 
-                                      : sem_func->arguments()[2];
+  Item* item_to_read = is_probe_phase ? m_probe_item : m_build_item;
 
   if (item_to_read == nullptr) return false;
 
@@ -172,9 +219,14 @@ bool SemJoinIterator::Init() {
     return true;  // error flushing last batch
   }
 
+  if (m_buffer_manager.FlushControl("BUILD_DONE")) {
+    return true; 
+  }
+
   // 5. Switch to probe phase.
   m_buffer_manager.PopResult(); // sync build stream
   m_buffer_manager.SetStatus("PROBE");
+  probe_idx = 0;
 
   if (m_probe_input->Init()) {
     return true;
@@ -214,8 +266,8 @@ int SemJoinIterator::Read() {
 
       // Push the key-index pair to GPU buffer manager
       std::string key_copy(m_buffer.ptr(), m_buffer.length());
-      uint32_t probe_idx = m_probe_rows_queue.size() - 1;
       KeyIndexPair pair{key_copy, probe_idx};
+      probe_idx += 1;
       if (m_buffer_manager.PushTuple(pair)) {
         return 1;  // error pushing or launching kernel
       }

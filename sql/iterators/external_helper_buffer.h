@@ -28,6 +28,8 @@ public:
 
   bool FlushBatch();
 
+  bool FlushControl(const std::string& status);
+
   std::unique_ptr<ResultType> PopResult();
 
   void SetStatus(const std::string& status);
@@ -65,21 +67,15 @@ ViperFlow<TupleType, ResultType>::ViperFlow(
     m_helper = std::make_unique<gpuhashjoinhelpers::GPUHashJoinHelper>(m_batch_size);
   }
   else if (helper_name == "semantic_filter") {
-    m_batch_size = std::min<size_t>(32, m_estimated_rows);
-    while (m_batch_size < 512) {
-      size_t calls = (m_estimated_rows + m_batch_size - 1) / m_batch_size;
-      if (calls < 100) break;
-      m_batch_size <<= 1;
-    }
     m_helper = std::make_unique<llmhelpers::LLMFilterHelper>();
   }
+  else if (helper_name == "semantic_filter_two_col") {
+    m_helper = std::make_unique<llmhelpers::LLMTwoColFilterHelper>();
+  }
   else if (helper_name == "semantic_generate") {
-    // Batch-size policy same as LLMFilter for now
-    m_batch_size = 32;
     m_helper = std::make_unique<llmhelpers::LLMGenerateHelper>();
   }
   else if (helper_name == "sem_llm_join") {
-    m_batch_size = 2;
     m_helper = std::make_unique<semhelpers::SemJoinHelper>("sem_llm_join");
   }
   else {
@@ -186,9 +182,37 @@ bool ViperFlow<TupleType, ResultType>::FlushBatch() {
 }
 
 template <typename TupleType, typename ResultType>
+bool ViperFlow<TupleType, ResultType>::FlushControl(const std::string& status) {
+  if (!m_helper) {
+    log_to_file("helper not initialized in FlushControl");
+    return true;
+  }
+
+  if (m_external_call_running) {
+    if (m_helper->Synchronize()) return true;
+    if (FetchAndQueueResults()) return true;
+    m_external_call_running = false;
+  }
+
+  m_helper->SetStatus(status);
+  if (m_helper->SubmitBatch(nullptr, 0)) {
+    log_to_file("Failed to submit control batch, status=" + status);
+    return true;
+  }
+  m_external_call_running = true;
+
+  if (m_helper->Synchronize()) return true;
+  if (FetchAndQueueResults()) return true;
+  m_external_call_running = false;
+
+  return false;
+}
+
+template <typename TupleType, typename ResultType>
 std::unique_ptr<ResultType> ViperFlow<TupleType, ResultType>::PopResult() {
   if (m_result_queue.empty()) {
     if (FetchAndQueueResults()) {
+      log_to_file("FetchAndQueueResults fail");
       return nullptr;
     }
     if (m_result_queue.empty()) {

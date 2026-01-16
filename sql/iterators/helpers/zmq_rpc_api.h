@@ -60,7 +60,8 @@ nlohmann::json semantic_filter_zmq_rpc_call(const std::string& name,
 nlohmann::json semantic_join_zmq_rpc_call(const std::string& name,
                                             const std::vector<semhelpers::KeyIndexPair>& values,
                                             const std::string& predicate,
-                                            const std::string& type);
+                                            const std::string& type,
+                                             const std::string& join_id);
 
 } // namespace semhelpers
 

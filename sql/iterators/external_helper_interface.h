@@ -10,7 +10,7 @@
 #include <chrono>
 
 // Default batch size for vectorized operators
-static constexpr int BATCH_SIZE = 2048;
+static constexpr int BATCH_SIZE = 50;
 
 inline void log_to_file(const std::string& msg) {
   auto now = std::chrono::system_clock::now();

@@ -72,6 +72,8 @@ class SemJoinIterator : public RowIterator {
     bool probe_input_batch_mode,
     uint64_t* hash_table_generation,
     AccessPath::Type impl_type);
+  
+  ~SemJoinIterator() override;
 
   bool Init() override;
   int Read() override;
@@ -123,6 +125,7 @@ class SemJoinIterator : public RowIterator {
 
   // Optimization: Track the index of the probe row currently residing in m_probe_input_tables
   // Initialize to a sentinel value (e.g., NOT_FOUND or max size_t) in constructor.
+  uint32_t probe_idx;
   size_t m_current_loaded_probe_idx;
 
   // Track the global index corresponding to m_probe_rows_queue.front(). Starts at 0.
@@ -132,6 +135,12 @@ class SemJoinIterator : public RowIterator {
   // to ensure pointers in table->record[0] remain valid after Read() returns.
   std::vector<uchar> m_active_probe_row;
 
+  // Store the correct item for each phase
+  Item* m_probe_item = nullptr;
+  Item* m_build_item = nullptr;
+
+  // Helper to find which item belongs to the current table set
+  Item* resolve_item_for_tables(Item_func_sem_join* sem_func, const pack_rows::TableCollection& tables);
   bool extract_join_key_for_row(bool is_probe_phase);
 };
 

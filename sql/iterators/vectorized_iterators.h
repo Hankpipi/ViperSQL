@@ -6,7 +6,7 @@
 #include "sql/iterators/helpers/gpu_hash_join.h"
 #include "sql/iterators/external_helper_buffer.h"
 
-static constexpr int NUM_VECTORIZED_OPS = 3;
+static constexpr int NUM_VECTORIZED_OPS = 0;
 
 namespace gpu_temptable_aggregate_iterator {
 /**
@@ -121,7 +121,7 @@ class VectorizedFilterIterator final : public RowIterator {
       m_condition(condition),
       m_buffer_manager(64LL * 1024 * 1024,
                        num_rows_estimate,
-                       "semantic_filter") {}
+                       static_cast<const Item_func *>(condition)->func_name()) {}
 
   bool Init() override;
 

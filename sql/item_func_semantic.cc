@@ -190,7 +190,7 @@ Item_func_semantic_filter_two_col::Item_func_semantic_filter_two_col(THD *thd, c
                                                PT_item_list *a)
     : Item_func_semantic_filter(thd, pos, a) {}
 
-const char *Item_func_semantic_filter_two_col::func_name() const { return "semantic_filter"; }
+const char *Item_func_semantic_filter_two_col::func_name() const { return "semantic_filter_two_col"; }
 
 enum Item_func::Functype Item_func_semantic_filter_two_col::functype() const {
   return SEMANTIC_FILTER_TWO_COL;
