@@ -1660,51 +1660,6 @@ bool Query_block::setup_wild(THD *thd) {
   return false;
 }
 
-//for test
-static Item_func_sem_join *AsSemJoin(Item *item) {
-  if (item == nullptr || item->type() != Item::FUNC_ITEM)
-    return nullptr;
-
-  Item_func *f = down_cast<Item_func *>(item);
-  return dynamic_cast<Item_func_sem_join *>(f);
-}
-
-static bool ItemHasSemJoin(Item *item) {
-  if (item == nullptr) return false;
-
-  // 1) 自己就是 SEM_JOIN(...)
-  if (AsSemJoin(item) != nullptr) {
-    log_to_file("ItemHasSemJoin: found Item_func_sem_join");
-    return true;
-  }
-
-  // 2) 条件组合 (AND / OR)，递归每个子项
-  if (item->type() == Item::COND_ITEM) {
-    Item_cond *c = down_cast<Item_cond *>(item);
-    List_iterator<Item> it(*c->argument_list());
-    Item *arg;
-    while ((arg = it++)) {
-      if (ItemHasSemJoin(arg)) return true;
-    }
-    return false;
-  }
-
-  // 3) 其它函数类型（包括可能包裹 SEM_JOIN 的各种函数），递归所有参数
-  if (item->type() == Item::FUNC_ITEM) {
-    Item_func *f = down_cast<Item_func *>(item);
-
-    for (uint i = 0; i < f->argument_count(); ++i) {
-      Item *arg = f->arguments()[i];
-      if (ItemHasSemJoin(arg)) return true;
-    }
-    return false;
-  }
-
-  // 4) 其它类型（列、常量等）就没有子节点了
-  return false;
-}
-
-
 static void RouteSemJoinPendingConditions(
     std::vector<PendingCondition> *pending_conditions,
     std::vector<PendingCondition> *pending_join_conditions) {

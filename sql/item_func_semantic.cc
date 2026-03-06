@@ -74,6 +74,57 @@ bool parse_string_from_item(Item **args, uint arg_idx, String &str,
   return true;
 }
 
+Item_func_sem_join *AsSemJoin(Item *item) {
+  if (item == nullptr || item->type() != Item::FUNC_ITEM)
+    return nullptr;
+
+  Item_func *f = down_cast<Item_func *>(item);
+  return dynamic_cast<Item_func_sem_join *>(f);
+}
+
+bool ItemHasSemJoin(Item *item) {
+  if (item == nullptr) return false;
+
+  if (AsSemJoin(item) != nullptr) {
+    log_to_file("ItemHasSemJoin: found Item_func_sem_join");
+    return true;
+  }
+
+  if (item->type() == Item::COND_ITEM) {
+    Item_cond *c = down_cast<Item_cond *>(item);
+    List_iterator<Item> it(*c->argument_list());
+    Item *arg;
+    while ((arg = it++)) {
+      if (ItemHasSemJoin(arg)) return true;
+    }
+    return false;
+  }
+
+  if (item->type() == Item::FUNC_ITEM) {
+    Item_func *f = down_cast<Item_func *>(item);
+
+    for (uint i = 0; i < f->argument_count(); ++i) {
+      Item *arg = f->arguments()[i];
+      if (ItemHasSemJoin(arg)) return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
+bool JoinConditionsHaveSemJoin(const std::vector<Item *> &conds) {
+
+  size_t idx = 0;
+  for (Item *item : conds) {
+    if (ItemHasSemJoin(item)) {
+      return true;
+    }
+    idx++;
+  }
+  return false;
+}
+
 Item* find_semantic_func(Item* node) {
   if (!node) return nullptr;
 

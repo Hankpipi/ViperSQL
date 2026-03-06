@@ -65,20 +65,6 @@
 using pack_rows::TableCollection;
 using std::vector;
 
-static const char* AccessPathTypeName(AccessPath::Type t) {
-  switch (t) {
-    case AccessPath::TABLE_SCAN: return "TABLE_SCAN";
-    case AccessPath::INDEX_SCAN: return "INDEX_SCAN";
-    case AccessPath::NESTED_LOOP_JOIN: return "NESTED_LOOP_JOIN";
-    case AccessPath::HASH_JOIN: return "HASH_JOIN";
-    case AccessPath::SEM_LLM_JOIN: return "SEM_LLM_JOIN";
-    case AccessPath::SEM_TOPK_JOIN: return "SEM_TOPK_JOIN";
-    case AccessPath::SEM_EMB_JOIN: return "SEM_EMB_JOIN";
-    default: return "UNKNOWN_PATH";
-  }
-}
-
-
 AccessPath *NewSortAccessPath(THD *thd, AccessPath *child, Filesort *filesort,
                               ORDER *order, bool count_examined_rows) {
   assert(child != nullptr);

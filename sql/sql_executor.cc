@@ -1085,6 +1085,11 @@ void SplitConditions(Item *condition, QEP_TAB *current_table,
   Mem_root_array<Item *> condition_parts(*THR_MALLOC);
   ExtractConditions(condition, &condition_parts);
   for (Item *item : condition_parts) {
+    if (find_semantic_func(item) != nullptr) {
+      // Delay semantic filter to the absolute top of the query block
+      predicates_above_join->push_back(PendingCondition{item, -1});
+      continue;
+    }
     Item_func_trig_cond *trig_cond = GetTriggerCondOrNull(item);
     if (trig_cond != nullptr) {
       Item *inner_cond = trig_cond->arguments()[0];
@@ -1774,12 +1779,26 @@ AccessPath *GetTableAccessPath(THD *thd, QEP_TAB *qep_tab, QEP_TAB *qep_tabs) {
     qep_tab_map unhandled_duplicates = 0;
     table_map conditions_depend_on_outer_tables = 0;
     vector<PendingInvalidator> pending_invalidators;
+
+    // --- Subquery root-level bucket ---
+    vector<PendingCondition> sjm_pending_conditions;
+
     AccessPath *subtree_path = ConnectJoins(
         /*upper_first_idx=*/NO_PLAN_IDX, join_start, join_end, qep_tabs, thd,
         TOP_LEVEL,
-        /*pending_conditions=*/nullptr, &pending_invalidators,
+        &sjm_pending_conditions, &pending_invalidators, // <-- Passed here
         /*pending_join_conditions=*/nullptr, &unhandled_duplicates,
         &conditions_depend_on_outer_tables);
+
+    // --- Attach bubbled-up semantic filters to the subquery root ---
+    if (!sjm_pending_conditions.empty()) {
+      vector<Item *> sem_conds;
+      for (const auto &pc : sjm_pending_conditions) {
+        sem_conds.push_back(pc.cond);
+      }
+      subtree_path = PossiblyAttachFilter(subtree_path, sem_conds, thd, 
+                                          &conditions_depend_on_outer_tables);
+    }
 
     // If there were any weedouts that we had to drop during ConnectJoins()
     // (ie., the join left some tables that were supposed to be deduplicated
@@ -2350,8 +2369,28 @@ AccessPath *FinishPendingOperations(
     THD *thd, AccessPath *path, QEP_TAB *remove_duplicates_loose_scan_qep_tab,
     const vector<PendingCondition> &pending_conditions,
     table_map *conditions_depend_on_outer_tables) {
-  path = PossiblyAttachFilter(path, pending_conditions, thd,
-                              conditions_depend_on_outer_tables);
+
+  vector<Item *> normal_conds;
+  vector<Item *> sem_conds;
+
+  for (const PendingCondition &pc : pending_conditions) {
+    if (find_semantic_func(pc.cond) != nullptr) {
+      sem_conds.push_back(pc.cond);
+    } else {
+      normal_conds.push_back(pc.cond);
+    }
+  }
+
+  // Layer 1: Attach normal relational conditions first
+  if (!normal_conds.empty()) {
+    path = PossiblyAttachFilter(path, normal_conds, thd,
+                                conditions_depend_on_outer_tables);
+  }
+  // Layer 2: Attach semantic conditions last
+  if (!sem_conds.empty()) {
+    path = PossiblyAttachFilter(path, sem_conds, thd,
+                                conditions_depend_on_outer_tables);
+  }
 
   if (remove_duplicates_loose_scan_qep_tab != nullptr) {
     QEP_TAB *const qep_tab =
@@ -2364,62 +2403,6 @@ AccessPath *FinishPendingOperations(
   }
 
   return path;
-}
-
-static Item_func_sem_join *AsSemJoin(Item *item) {
-  if (item == nullptr || item->type() != Item::FUNC_ITEM)
-    return nullptr;
-
-  Item_func *f = down_cast<Item_func *>(item);
-  return dynamic_cast<Item_func_sem_join *>(f);
-}
-
-static bool ItemHasSemJoin(Item *item) {
-  if (item == nullptr) return false;
-
-  // 1) 自己就是 SEM_JOIN(...)
-  if (AsSemJoin(item) != nullptr) {
-    log_to_file("ItemHasSemJoin: found Item_func_sem_join");
-    return true;
-  }
-
-  // 2) 条件组合 (AND / OR)，递归每个子项
-  if (item->type() == Item::COND_ITEM) {
-    Item_cond *c = down_cast<Item_cond *>(item);
-    List_iterator<Item> it(*c->argument_list());
-    Item *arg;
-    while ((arg = it++)) {
-      if (ItemHasSemJoin(arg)) return true;
-    }
-    return false;
-  }
-
-  // 3) 其它函数类型（包括可能包裹 SEM_JOIN 的各种函数），递归所有参数
-  if (item->type() == Item::FUNC_ITEM) {
-    Item_func *f = down_cast<Item_func *>(item);
-
-    for (uint i = 0; i < f->argument_count(); ++i) {
-      Item *arg = f->arguments()[i];
-      if (ItemHasSemJoin(arg)) return true;
-    }
-    return false;
-  }
-
-  // 4) 其它类型（列、常量等）就没有子节点了
-  return false;
-}
-
-//for test
-static bool JoinConditionsHaveSemJoin(const std::vector<Item *> &conds) {
-
-  size_t idx = 0;
-  for (Item *item : conds) {
-    if (ItemHasSemJoin(item)) {
-      return true;
-    }
-    idx++;
-  }
-  return false;
 }
 
 static void CollectSemJoinForEdge(Item *item,
@@ -2478,21 +2461,6 @@ static void AppendSemJoinFromWhereForEdge(THD *thd,
 
   size_t before = join_conditions->size();
   CollectSemJoinForEdge(where, left_tables, right_tables, join_conditions);
-}
-
-static bool PendingConditionsHaveSemJoin(
-    const std::vector<PendingCondition> &conds) {
-  for (const PendingCondition &pc : conds) {
-    Item *item = pc.cond;  
-    if (item == nullptr) continue;
-
-    if (ItemHasSemJoin(item)) {
-      log_to_file("PendingConditionsHaveSemJoin: FOUND SEM_JOIN");
-      return true;
-    }
-  }
-  log_to_file("PendingConditionsHaveSemJoin: NO SEM_JOIN");
-  return false;
 }
 
 // pending_join_conditions 里挑出属于当前 (left_tables, right_tables) 这条边的 SEM_JOIN，
@@ -3320,21 +3288,29 @@ AccessPath *JOIN::create_root_access_path_for_join() {
     qep_tab_map unhandled_duplicates = 0;
     qep_tab_map conditions_depend_on_outer_tables = 0;
     vector<PendingInvalidator> pending_invalidators;
+    vector<PendingCondition> global_pending_conditions;
+
     path = ConnectJoins(
         /*upper_first_idx=*/NO_PLAN_IDX, const_tables, primary_tables, qep_tab,
-        thd, TOP_LEVEL, nullptr, &pending_invalidators,
+        thd, TOP_LEVEL, &global_pending_conditions, &pending_invalidators,
         /*pending_join_conditions=*/nullptr, &unhandled_duplicates,
         &conditions_depend_on_outer_tables);
 
-    // If there were any weedouts that we had to drop during ConnectJoins()
-    // (ie., the join left some tables that were supposed to be deduplicated
-    // but were not), handle them now at the very end.
     if (unhandled_duplicates != 0) {
       AccessPath *const child = path;
       path = NewWeedoutAccessPathForTables(thd, unhandled_duplicates, qep_tab,
                                            primary_tables, child);
-
       CopyBasicProperties(*child, path);
+    }
+
+    // Attach bubbled-up semantic filters to the final root
+    if (!global_pending_conditions.empty()) {
+      vector<Item *> root_sem_conds;
+      for (const auto &pc : global_pending_conditions) {
+        root_sem_conds.push_back(pc.cond);
+      }
+      path = PossiblyAttachFilter(path, root_sem_conds, thd, 
+                                  &conditions_depend_on_outer_tables);
     }
   }
 

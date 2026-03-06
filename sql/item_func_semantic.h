@@ -99,6 +99,9 @@ bool parse_string_from_item(Item **args, uint arg_idx, String &str,
                      const char *func_name, std::string &value, std::string *field_name);
 bool parse_string_from_blob(Field *field, std::string &data);
 Item *find_semantic_func(Item *node);
+bool JoinConditionsHaveSemJoin(const std::vector<Item *> &conds);
+bool ItemHasSemJoin(Item *item);
+Item_func_sem_join *AsSemJoin(Item *item);
 
 
 #endif  // ITEM_FUNC_SEMANTIC_H
