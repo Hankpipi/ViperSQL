@@ -859,6 +859,10 @@ struct AccessPath {
     assert(type == SEM_LLM_JOIN);
     return u.sem_join;
   }
+  const auto &sem_join() const {
+    assert(type == SEM_LLM_JOIN);
+    return u.sem_join;
+  }
 
   double num_output_rows() const { return m_num_output_rows; }
 

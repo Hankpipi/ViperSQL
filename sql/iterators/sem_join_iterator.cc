@@ -241,7 +241,6 @@ bool SemJoinIterator::Init() {
 }
 
 int SemJoinIterator::Read() {
-  log_to_file("SemJoinIterator::Read");
   for (;;) {
     // Always try to read one probe row each Read() call
     int ret = m_probe_input->Read();

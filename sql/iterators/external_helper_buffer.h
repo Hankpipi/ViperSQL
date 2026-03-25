@@ -76,7 +76,7 @@ ViperFlow<TupleType, ResultType>::ViperFlow(
     m_helper = std::make_unique<llmhelpers::LLMGenerateHelper>();
   }
   else if (helper_name == "sem_llm_join") {
-    m_helper = std::make_unique<semhelpers::SemJoinHelper>("sem_llm_join");
+    m_helper = std::make_unique<semhelpers::SemJoinHelper>("sem_cascade_join");
   }
   else {
     log_to_file("Unknown helper: " + helper_name);

@@ -1309,6 +1309,20 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       children->push_back({path->hash_join().inner, "Hash"});
       break;
     }
+    case AccessPath::SEM_LLM_JOIN:
+    case AccessPath::SEM_TOPK_JOIN:
+    case AccessPath::SEM_EMB_JOIN: {
+      error |= AddMemberToObject<Json_string>(obj, "access_type", "join");
+      error |= AddMemberToObject<Json_string>(obj, "join_type", "inner join");
+      error |= AddMemberToObject<Json_string>(obj, "join_algorithm", "semantic");
+      
+      description = "Semantic LLM Join";
+      
+      // The EXPLAIN printer will recursively print the outer (probe) and inner (build) paths
+      children->push_back({path->sem_join().outer});
+      children->push_back({path->sem_join().inner, "Semantic Model Build"});
+      break;
+    }
     case AccessPath::FILTER: {
       error |= AddMemberToObject<Json_string>(obj, "access_type", "filter");
       string filter = ItemToString(path->filter().condition);

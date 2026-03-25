@@ -106,7 +106,6 @@ bool SemJoinHelper::SubmitProbeBatch(const void* host_data, size_t n_rows) {
     nlohmann::json resp;
     try {
       resp = semantic_join_zmq_rpc_call(name, values, predicate, type, join_id);
-      log_to_file("SemJoinHelper::SubmitProbeBatch result: " + std::string(resp.dump()));
       // Optional: Store raw response for debug
       // m_raw_response = resp.dump(); 
     } catch (const std::exception& e) {
@@ -145,7 +144,6 @@ bool SemJoinHelper::SubmitProbeBatch(const void* host_data, size_t n_rows) {
     // but BufferManager usually waits for Synchronize() first.
     m_results.swap(temp_results);
 
-    log_to_file("m_results: " + std::to_string(m_results.size()));
   });
 
   return false;
@@ -227,8 +225,6 @@ bool SemJoinHelper::FetchResults(void* out_buffer, size_t* out_result_count) {
   std::copy(m_results.begin(), m_results.end(), buffer_ptr);
 
   *out_result_count = m_results.size();
-
-  log_to_file("out_result_count: " + std::to_string(m_results.size()));
   
   // 3. Clear results to avoid re-reading
   m_results.clear();
