@@ -633,7 +633,7 @@ int VectorizedFilterIterator::Read() {
     thd()->check_yield();
 
     if (ret == 0) {
-      // 1a) pack it into an in‐memory buffer
+      // 1a) pack it into an in-memory buffer
       auto row_buf = store_row_to_buffer(m_tables, m_row_size);
       if (row_buf.empty()) {
         log_to_file("VectorizedFilterIterator: failed to pack row");
@@ -641,18 +641,37 @@ int VectorizedFilterIterator::Read() {
       }
       m_rows_queue.push(std::move(row_buf));
 
-      // 1b) ask the semantic‐filter to build its prompt
-      auto *sf = static_cast<Item_func_semantic_filter*>(m_condition);
-      std::string prompt = sf->compute_prompt();
+      // 1b) Ask the semantic-filter(s) to build the raw prompt
+      std::string prompt;
+      if (m_condition->type() == Item::COND_ITEM) {
+          // Unpack multiple semantic filters and cleanly concatenate them
+          Item_cond_and *and_cond = static_cast<Item_cond_and*>(m_condition);
+          List_iterator<Item> it(*and_cond->argument_list());
+          Item *arg;
+          
+          bool first = true;
+          while ((arg = it++)) {
+              auto *sf = static_cast<Item_func_semantic_filter*>(arg);
+              if (!first) {
+                  prompt += "\nAnd\n";
+              }
+              prompt += sf->compute_prompt();
+              first = false;
+          }
+      } else {
+          // Single semantic filter
+          auto *sf = static_cast<Item_func_semantic_filter*>(m_condition);
+          prompt = sf->compute_prompt();
+      }
 
-      // 1c) submit that prompt to the LLM helper
+      // 1c) submit the cleanly joined prompt to the LLM helper
       if (m_buffer_manager.PushTuple(prompt)) {
         log_to_file("VectorizedFilterIterator: PushTuple failed");
         return 1;
       }
     }
     else if (ret == -1) {
-      // upstream exhausted → flush final batch
+      // upstream exhausted -> flush final batch
       if (m_buffer_manager.FlushBatch()) {
         log_to_file("VectorizedFilterIterator: FlushBatch failed");
         return 1;
@@ -680,7 +699,7 @@ int VectorizedFilterIterator::Read() {
       continue;
     }
 
-    // 4) matched → emit
+    // 4) matched -> emit
     LoadIntoTableBuffers(m_tables, row_buf.data());
     return 0;
   }

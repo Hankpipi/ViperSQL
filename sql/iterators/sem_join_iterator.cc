@@ -77,7 +77,6 @@ SemJoinIterator::SemJoinIterator(
   // Extract prompt from the first condition (if exists) and set it
   if (!m_sem_conditions.empty()) {
       std::string p = m_sem_conditions[0]->prompt();
-      // [TODO] send prompt to ViperFlow
       log_to_file("SemJoinIterator: Prompt set to: " + p);
   }
   if (!m_sem_conditions.empty()) {
@@ -112,11 +111,14 @@ Item* SemJoinIterator::resolve_item_for_tables(Item_func_sem_join* sem_func, con
     Item* candidates[] = { sem_func->arguments()[1], sem_func->arguments()[2] };
 
     for (Item* item : candidates) {
-      if (item->type() == Item::FIELD_ITEM) {
-          Item_field* field_item = static_cast<Item_field*>(item);
+      // Extract the underlying item, bypassing any Item_ref wrappers
+      Item* real_item = item->real_item();
+      
+      if (real_item->type() == Item::FIELD_ITEM) {
+          Item_field* field_item = static_cast<Item_field*>(real_item);
           for (size_t i = 0; i < tables.tables().size(); ++i) {
             if (tables.tables()[i].table == field_item->field->table) {
-              return item;
+              return item; // Return the original item so val_str() evaluates correctly
             }
           }
       }

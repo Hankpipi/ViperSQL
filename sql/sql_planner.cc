@@ -78,6 +78,7 @@
 #include "sql/table.h"
 #include "sql/window.h"
 #include "sql_string.h"
+#include "sql/iterators/external_helper_interface.h"
 
 using std::max;
 using std::min;

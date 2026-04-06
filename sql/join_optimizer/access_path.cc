@@ -865,30 +865,78 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         if (FinalizeMaterializedSubqueries(thd, join, path)) {
           return nullptr;
         }
-        if (Item *sem = find_semantic_func(param.condition)) {
-          ha_rows num_rows_estimate = param.child->num_output_rows() < 0.0
-                                          ? HA_POS_ERROR
-                                          : lrint(param.child->num_output_rows());
-          Prealloced_array<TABLE*, 4> tables =
-              GetUsedTables(param.child, /*include_pruned_tables=*/true);
-          iterator = NewIterator<VectorizedFilterIterator>(
-              thd,
-              mem_root,
-              std::move(job.children[0]),
-              TableCollection(tables, /*store_rowids=*/false,
-                            /*tables_to_get_rowid_for=*/0,
-                            GetNullableEqRefTables(param.child)),
-              sem, 
-              num_rows_estimate);
+
+        std::vector<Item*> sem_filters;
+        std::vector<Item*> normal_filters;
+
+        // Recursive lambda to safely flatten nested AND blocks
+        auto extract_filters = [](auto& self, Item* cond, std::vector<Item*>& sem_out, std::vector<Item*>& norm_out) -> void {
+            if (!cond) return;
+            if (cond->type() == Item::COND_ITEM && 
+                down_cast<Item_cond*>(cond)->functype() == Item_func::COND_AND_FUNC) {
+                List_iterator<Item> it(*down_cast<Item_cond*>(cond)->argument_list());
+                Item* arg;
+                while ((arg = it++)) {
+                    self(self, arg, sem_out, norm_out);
+                }
+            } else {
+                if (Item* sem = find_semantic_func(cond)) {
+                    sem_out.push_back(sem);
+                } else {
+                    norm_out.push_back(cond);
+                }
+            }
+        };
+
+        extract_filters(extract_filters, param.condition, sem_filters, normal_filters);
+
+        unique_ptr_destroy_only<RowIterator> current_iterator = std::move(job.children[0]);
+
+        if (!sem_filters.empty()) {
+            ha_rows num_rows_estimate = param.child->num_output_rows() < 0.0
+                                            ? HA_POS_ERROR
+                                            : lrint(param.child->num_output_rows());
+            Prealloced_array<TABLE*, 4> tables =
+                GetUsedTables(param.child, /*include_pruned_tables=*/true);
+
+            Item* merged_sem_cond = nullptr;
+            if (sem_filters.size() == 1) {
+                merged_sem_cond = sem_filters[0];
+            } else {
+                List<Item> list_arg;
+                for (Item* item : sem_filters) {
+                    list_arg.push_back(item);
+                }
+                merged_sem_cond = new (mem_root) Item_cond_and(list_arg);
+                merged_sem_cond->quick_fix_field();
+                merged_sem_cond->update_used_tables();
+            }
+
+            current_iterator = NewIterator<VectorizedFilterIterator>(
+                thd, mem_root, std::move(current_iterator),
+                TableCollection(tables, /*store_rowids=*/false,
+                                /*tables_to_get_rowid_for=*/0,
+                                GetNullableEqRefTables(param.child)),
+                merged_sem_cond, num_rows_estimate);
         }
-        else {
-          // fall back to the old, row‐by‐row FilterIterator
-          iterator = NewIterator<FilterIterator>(
-              thd,
-              mem_root,
-              std::move(job.children[0]),
-              param.condition);
+
+        if (!normal_filters.empty()) {
+            Item* remaining_cond = nullptr;
+            if (normal_filters.size() == 1) {
+                remaining_cond = normal_filters[0];
+            } else {
+                List<Item> list_arg;
+                for (Item* item : normal_filters) {
+                    list_arg.push_back(item);
+                }
+                remaining_cond = new (mem_root) Item_cond_and(list_arg);
+            }
+
+            current_iterator = NewIterator<FilterIterator>(
+                thd, mem_root, std::move(current_iterator), remaining_cond);
         }
+
+        iterator = std::move(current_iterator);
         break;
       }
       case AccessPath::SORT: {

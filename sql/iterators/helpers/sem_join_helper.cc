@@ -24,7 +24,7 @@ static std::string GenRandomJoinId() {
   uint64_t b = dist(rng);
 
   std::ostringstream oss;
-  oss << std::hex << a << b;   // 足够唯一
+  oss << std::hex << a << b;
   return oss.str();
 }
 
@@ -159,7 +159,6 @@ bool SemJoinHelper::SubmitBuildDone() {
 
   m_future = std::async(std::launch::async, [this, name, predicate, type, join_id]() {
     try {
-      // values 为空
       std::vector<KeyIndexPair> empty;
       nlohmann::json resp = semantic_join_zmq_rpc_call(name, empty, predicate, type, join_id);
       m_raw_response = resp.dump();

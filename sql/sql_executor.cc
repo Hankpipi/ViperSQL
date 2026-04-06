@@ -2405,113 +2405,70 @@ AccessPath *FinishPendingOperations(
   return path;
 }
 
-static void CollectSemJoinForEdge(Item *item,
-                                  table_map left_tables,
-                                  table_map right_tables,
-                                  std::vector<Item *> *out) {
-  if (item == nullptr || out == nullptr)
-    return;
-
-  // 1) 自己就是 SEM_JOIN 的情况 —— 先不管 table_map，先把链路打通
-  if (Item_func_sem_join *sj = AsSemJoin(item)) {
-    log_to_file("CollectSemJoinForEdge: found SEM_JOIN (no table_map filter)");
-    out->push_back(sj);
-    // 不再递归这棵子树，避免重复收集
-    return;
-  }
-
-  // 2) 条件节点（AND / OR），递归 children
-  if (item->type() == Item::COND_ITEM) {
-    Item_cond *c = down_cast<Item_cond *>(item);
-    List_iterator<Item> it(*c->argument_list());
-    Item *arg;
-    while ((arg = it++)) {
-      CollectSemJoinForEdge(arg, left_tables, right_tables, out);
+// Safely digs through MySQL's "0 <> func" or "func = 1" wrappers
+static Item_func* ExtractUnderlyingSemJoin(Item* cond) {
+    if (!cond) return nullptr;
+    if (cond->type() == Item::FUNC_ITEM) {
+        Item_func* f = down_cast<Item_func*>(cond);
+        if (my_strcasecmp(system_charset_info, f->func_name(), "sem_join") == 0) {
+            return f;
+        }
+        // Unwrap boolean comparisons
+        if (f->functype() == Item_func::EQ_FUNC || f->functype() == Item_func::NE_FUNC) {
+            for (uint i = 0; i < f->argument_count(); ++i) {
+                Item* arg = f->arguments()[i];
+                if (arg->type() == Item::FUNC_ITEM) {
+                    Item_func* arg_f = down_cast<Item_func*>(arg);
+                    if (my_strcasecmp(system_charset_info, arg_f->func_name(), "sem_join") == 0) {
+                        return arg_f;
+                    }
+                }
+            }
+        }
     }
-    return;
-  }
+    return nullptr;
+}
 
-  // 3) 其它函数节点，也递归它的参数
-  if (item->type() == Item::FUNC_ITEM) {
-    Item_func *f = down_cast<Item_func *>(item);
-    for (uint i = 0; i < f->argument_count(); ++i) {
-      Item *arg = f->arguments()[i];
-      CollectSemJoinForEdge(arg, left_tables, right_tables, out);
+// Checks physical tables and unwraps the function for the Iterator Factory
+static void HoistPrematureSemJoins(std::vector<Item *> &join_conditions,
+                                   table_map left_tables,
+                                   table_map right_tables,
+                                   std::vector<PendingCondition> *pending_join_conditions) {
+    std::vector<Item *> ready_conditions;
+    for (Item *cond : join_conditions) {
+        Item_func* sem_func = ExtractUnderlyingSemJoin(cond);
+        if (sem_func != nullptr) {
+            table_map physical_tables = 0;
+            
+            // Bypass Equivalence Classes to find the real physical tables
+            for (uint j = 1; j < sem_func->argument_count(); ++j) {
+                Item *real = sem_func->arguments()[j]->real_item();
+                if (real->type() == Item::FIELD_ITEM) {
+                    Item_field *field_item = static_cast<Item_field*>(real);
+                    if (field_item->field && field_item->field->table && field_item->field->table->pos_in_table_list) {
+                        physical_tables |= field_item->field->table->pos_in_table_list->map();
+                    }
+                }
+            }
+            if (physical_tables == 0) physical_tables = sem_func->used_tables();
+            
+            table_map edge_tables = left_tables | right_tables;
+            
+            if ((physical_tables & ~edge_tables) == 0 && physical_tables != 0) {
+                // READY: Push the UNWRAPPED sem_func so the iterator parses the prompt!
+                ready_conditions.push_back(sem_func);
+            } else {
+                // PREMATURE: Hoist the ORIGINAL wrapped condition back up the tree
+                if (pending_join_conditions != nullptr) {
+                    pending_join_conditions->push_back({cond});
+                }
+            }
+        } else {
+            ready_conditions.push_back(cond);
+        }
     }
-    return;
-  }
-
-  // 其它类型直接忽略
+    join_conditions = std::move(ready_conditions);
 }
-
-static void AppendSemJoinFromWhereForEdge(THD *thd,
-                                          table_map left_tables,
-                                          table_map right_tables,
-                                          std::vector<Item *> *join_conditions) {
-  if (thd == nullptr || join_conditions == nullptr) return;
-
-  Query_block *qb = thd->lex->query_block;
-  if (qb == nullptr) return;
-
-  Item *where = qb->where_cond(); 
-  if (where == nullptr) {
-    log_to_file("AppendSemJoinFromWhereForEdge: where is null");
-    return;
-  }
-
-  size_t before = join_conditions->size();
-  CollectSemJoinForEdge(where, left_tables, right_tables, join_conditions);
-}
-
-// pending_join_conditions 里挑出属于当前 (left_tables, right_tables) 这条边的 SEM_JOIN，
-// 追加到 join_conditions 里。
-static void AppendSemJoinCondsForEdge(
-    const std::vector<PendingCondition> &pending_join_conditions,
-    table_map left_tables,
-    table_map right_tables,
-    std::vector<Item *> *join_conditions) {
-  if (join_conditions == nullptr) return;
-
-  // 当前这条 join 边涉及到的表集合（左+右）
-  table_map edge_tables = left_tables | right_tables;
-
-  {
-    std::string msg = "AppendSemJoinCondsForEdge: pending size=" +
-                      std::to_string(pending_join_conditions.size());
-    log_to_file(msg.c_str());
-  }
-
-  for (const PendingCondition &pc : pending_join_conditions) {
-    Item *cond = pc.cond;   // 如果你的 PendingCondition 字段不是 cond，这里改成实际名字
-    if (cond == nullptr) continue;
-
-    // 深度检查这棵表达式树里是否含有 SEM_JOIN
-    if (!ItemHasSemJoin(cond))
-      continue;
-
-    // 这棵条件实际用到的表
-    table_map cond_tables = cond->used_tables();
-
-    // 如果这棵条件引用了当前 edge 之外的表（例如跨 A,B,C 三张表），跳过
-    if ((cond_tables & ~edge_tables) != 0)
-      continue;
-
-    // 要求它同时命中左表和右表，否则只是对单边的 filter，不是这条 join 的条件
-    if ((cond_tables & left_tables) == 0)  continue;
-    if ((cond_tables & right_tables) == 0) continue;
-
-    log_to_file("AppendSemJoinCondsForEdge: attach SEM_JOIN to current edge");
-    join_conditions->push_back(cond);
-  }
-
-  {
-    std::string msg = "AppendSemJoinCondsForEdge: join_conditions size after append=" +
-                      std::to_string(join_conditions->size());
-    log_to_file(msg.c_str());
-  }
-}
-
-
 
 /**
   For a given slice of the table list, build up the iterator tree corresponding
@@ -2845,33 +2802,22 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
       } else if (((UseHashJoin(qep_tab) && !right_side_depends_on_outer) ||
                   UseBKA(qep_tab)) &&
                  !QueryMixesOuterBKAAndBNL(qep_tab->join())) {
-        // Join conditions that were inside the substructure are placed in the
-        // vector 'subtree_pending_join_conditions'. Find out which of these
-        // conditions that should be attached to this table, and attach them
-        // to the hash join iterator.
         vector<Item *> join_conditions;
-        PickOutConditionsForTableIndex(i, &subtree_pending_join_conditions,
-                                       &join_conditions);
-        // AppendSemJoinCondsForEdge(subtree_pending_join_conditions,
-        //                   left_tables, right_tables,
-        //                   &join_conditions);
-        AppendSemJoinFromWhereForEdge(thd,
-                              left_tables, right_tables,
-                              &join_conditions);
-        
+        PickOutConditionsForTableIndex(i, &subtree_pending_join_conditions, &join_conditions);
+
+        HoistPrematureSemJoins(join_conditions, left_tables, right_tables, &subtree_pending_join_conditions);
+
         if (JoinConditionsHaveSemJoin(join_conditions)) {
             path = CreateSemanticJoinAccessPath(
                 thd, qep_tab,
-                /*build*/ subtree_path,
-                /*build tables*/ right_tables,
-                /*probe*/ path,
-                /*probe tables*/ left_tables,
+                /*build=*/ subtree_path,
+                /*build tables=*/ right_tables,
+                /*probe=*/ path,
+                /*probe tables=*/ left_tables,
                 join_type,
                 &join_conditions,
                 conditions_depend_on_outer_tables);
-        }
-
-        if (UseBKA(qep_tab)) {
+        } else if (UseBKA(qep_tab)) {
           path = CreateBKAAccessPath(thd, qep_tab->join(), path, left_tables,
                                      subtree_path, right_tables,
                                      qep_tab->table(), qep_tab->table_ref,
@@ -2892,13 +2838,26 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
         // Similar to hash join above, pick out those conditions and add them
         // here.
         vector<Item *> join_conditions;
-        PickOutConditionsForTableIndex(i, &subtree_pending_join_conditions,
-                                       &join_conditions);
-        subtree_path = PossiblyAttachFilter(subtree_path, join_conditions, thd,
-                                            conditions_depend_on_outer_tables);
+        PickOutConditionsForTableIndex(i, &subtree_pending_join_conditions, &join_conditions);
 
-        path = CreateNestedLoopAccessPath(thd, path, subtree_path, join_type,
-                                          pfs_batch_mode);
+        HoistPrematureSemJoins(join_conditions, left_tables, right_tables, &subtree_pending_join_conditions);
+
+        if (JoinConditionsHaveSemJoin(join_conditions)) {
+            path = CreateSemanticJoinAccessPath(
+                thd, qep_tab,
+                /*build=*/ path,
+                /*build tables=*/ left_tables,
+                /*probe=*/ subtree_path, 
+                /*probe tables=*/ right_tables,
+                join_type,
+                &join_conditions,
+                conditions_depend_on_outer_tables);
+        } else {
+            subtree_path = PossiblyAttachFilter(subtree_path, join_conditions, thd,
+                                                conditions_depend_on_outer_tables);
+            path = CreateNestedLoopAccessPath(thd, path, subtree_path, join_type,
+                                              pfs_batch_mode);
+        }
         SetCostOnNestedLoopAccessPath(*thd->cost_model(), qep_tab->position(),
                                       path);
       }
@@ -3017,6 +2976,18 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
       // (i.e. filters).
       ExtractJoinConditions(qep_tab, &predicates_below_join, &join_conditions);
     }
+    // --- NEW: Intercept SEM_JOIN from the optimizer's pushed conditions ---
+    vector<Item*> intercepted_sem_joins;
+    vector<Item*> normal_preds;
+    for (Item* cond : predicates_below_join) {
+        if (ExtractUnderlyingSemJoin(cond) != nullptr) {
+            intercepted_sem_joins.push_back(cond);
+        } else {
+            normal_preds.push_back(cond);
+        }
+    }
+    predicates_below_join = std::move(normal_preds);
+    // ----------------------------------------------------------------------
 
     if (!qep_tab->condition_is_pushed_to_sort()) {  // See the comment on #2.
       double expected_rows = table_path->num_output_rows();
@@ -3118,31 +3089,27 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
         if (pending_join_conditions != nullptr){
           PickOutConditionsForTableIndex(i, pending_join_conditions,
                                          &join_conditions);
-          // AppendSemJoinCondsForEdge(*pending_join_conditions,
-          //                           left_tables, right_tables,
-          //                           &join_conditions);
         }
-
-        AppendSemJoinFromWhereForEdge(thd,
-                              left_tables, right_tables,
-                              &join_conditions);
+        // Add the intercepted conditions
+        join_conditions.insert(join_conditions.end(), intercepted_sem_joins.begin(), intercepted_sem_joins.end());
         
+        HoistPrematureSemJoins(join_conditions, left_tables, right_tables, pending_join_conditions);
+
         if (JoinConditionsHaveSemJoin(join_conditions)) {
             path = CreateSemanticJoinAccessPath(
                 thd, qep_tab,
-                /*build*/ path,
-                /*build tables*/ left_tables,
-                /*probe*/ table_path,
-                /*probe tables*/ right_tables,
+                /*build=*/ path,
+                /*build tables=*/ left_tables,
+                /*probe=*/ table_path,
+                /*probe tables=*/ right_tables,
                 JoinType::INNER,
                 &join_conditions,
                 conditions_depend_on_outer_tables);
-        }
-        else {
-          path = CreateHashJoinAccessPath(thd, qep_tab, path, left_tables,
-                                        table_path, right_tables,
-                                        JoinType::INNER, &join_conditions,
-                                        conditions_depend_on_outer_tables);
+        } else {
+            path = CreateHashJoinAccessPath(thd, qep_tab, path, left_tables,
+                                          table_path, right_tables,
+                                          JoinType::INNER, &join_conditions,
+                                          conditions_depend_on_outer_tables);
         }
 
         // Attach any remaining non-equi-join conditions as a filter after the
@@ -3150,9 +3117,31 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
         path = PossiblyAttachFilter(path, join_conditions, thd,
                                     conditions_depend_on_outer_tables);
       } else {
-        path = CreateNestedLoopAccessPath(
-            thd, path, table_path, JoinType::INNER,
-            qep_tab->pfs_batch_update(qep_tab->join()));
+        vector<Item *> inner_join_conditions;
+        if (pending_join_conditions != nullptr) {
+            PickOutConditionsForTableIndex(i, pending_join_conditions, &inner_join_conditions);
+        }
+
+        inner_join_conditions.insert(inner_join_conditions.end(), intercepted_sem_joins.begin(), intercepted_sem_joins.end());
+        
+        HoistPrematureSemJoins(inner_join_conditions, left_tables, right_tables, pending_join_conditions);
+
+        if (JoinConditionsHaveSemJoin(inner_join_conditions)) {
+            path = CreateSemanticJoinAccessPath(
+                thd, qep_tab,
+                /*build=*/ path,
+                /*build tables=*/ left_tables,
+                /*probe=*/ table_path, 
+                /*probe tables=*/ right_tables,
+                JoinType::INNER,
+                &inner_join_conditions,
+                conditions_depend_on_outer_tables);
+        } else {
+            path = CreateNestedLoopAccessPath(
+                thd, path, table_path, JoinType::INNER,
+                qep_tab->pfs_batch_update(qep_tab->join()));
+            path = PossiblyAttachFilter(path, inner_join_conditions, thd, conditions_depend_on_outer_tables);
+        }
         SetCostOnNestedLoopAccessPath(*thd->cost_model(), qep_tab->position(),
                                       path);
       }

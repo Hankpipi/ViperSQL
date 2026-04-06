@@ -219,25 +219,61 @@ class CostingReceiver {
 
   bool FoundSingleNode(int node_idx);
 
-  static bool EdgeHasSemJoin(const JoinPredicate *edge) {
-  log_to_file("into EdgeHasSemJoin");
-  // 遍历这条 join 的条件，看里面有没有 SEM_JOIN(...)
-  for (Item *cond : edge->expr->join_conditions) {
-    // check Item_func_sem_join 的声明：
-    if (dynamic_cast<Item_func_sem_join *>(cond) != nullptr) {
-      return true;
-    }
-    // check func_name():
-    if (cond->type() == Item::FUNC_ITEM) {
-      Item_func *f = down_cast<Item_func *>(cond);
-      log_to_file(f->func_name());
-      if (my_strcasecmp(system_charset_info, f->func_name(), "sem_join") == 0) {
-        return true;
+  static bool EdgeHasSemJoin(const JoinPredicate *edge, NodeMap left, NodeMap right, const JoinHypergraph *graph) {
+    table_map edge_tables = 0;
+    table_map left_tables = 0;
+    table_map right_tables = 0;
+
+    // Calculate the physical tables available on the left and right sides of this join edge
+    for (size_t i : BitsSetIn(left)) left_tables |= graph->nodes[i].table->pos_in_table_list->map();
+    for (size_t i : BitsSetIn(right)) right_tables |= graph->nodes[i].table->pos_in_table_list->map();
+    edge_tables = left_tables | right_tables;
+
+    auto is_valid_sem_join = [&](Item *cond) {
+      Item_func *f = nullptr;
+      if (dynamic_cast<Item_func_sem_join *>(cond) != nullptr) {
+        f = down_cast<Item_func *>(cond);
+      } else if (cond->type() == Item::FUNC_ITEM) {
+        Item_func *temp_f = down_cast<Item_func *>(cond);
+        if (my_strcasecmp(system_charset_info, temp_f->func_name(), "sem_join") == 0) {
+          f = temp_f;
+        }
       }
+
+      if (f != nullptr) {
+        // Calculate tables actually required by the SEM_JOIN
+        table_map needed_tables = f->used_tables();
+        if (needed_tables == 0) {
+          // Fallback: Manually extract used_tables from arguments if the function returns 0
+          for (uint j = 1; j < f->argument_count(); ++j) {
+            needed_tables |= f->arguments()[j]->used_tables();
+          }
+        }
+
+        // 1. All required tables MUST be available at this join edge
+        if ((needed_tables & ~edge_tables) == 0 && needed_tables != 0) {
+          // 2. The condition MUST cross the join boundary (one table from left, one from right)
+          // This ensures the Semantic Join is placed exactly where the two tables meet.
+          if ((needed_tables & left_tables) != 0 && (needed_tables & right_tables) != 0) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+
+    // Check conditions attached to this specific edge
+    for (Item *cond : edge->expr->join_conditions) {
+      if (is_valid_sem_join(cond)) return true;
     }
+
+    // Also check global WHERE predicates in case the optimizer didn't push it down
+    for (size_t i = 0; i < graph->num_where_predicates; ++i) {
+      if (is_valid_sem_join(graph->predicates[i].condition)) return true;
+    }
+
+    return false;
   }
-  return false;
-}
 
 
   // Called EmitCsgCmp() in the DPhyp paper.
@@ -3107,8 +3143,7 @@ bool CostingReceiver::FoundSubgraphPair(NodeMap left, NodeMap right,
     return false;
   }
 
-  // bool is_sem_join_edge = edge->is_semantic_join;
-  bool is_sem_join_edge = EdgeHasSemJoin(edge);
+  bool is_sem_join_edge = EdgeHasSemJoin(edge, left, right, m_graph);
   bool is_commutative = OperatorIsCommutative(*edge->expr);
 
   // If we have an equi-semijoin, and the inner side is deduplicated

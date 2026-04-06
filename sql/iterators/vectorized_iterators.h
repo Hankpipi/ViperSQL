@@ -121,7 +121,16 @@ class VectorizedFilterIterator final : public RowIterator {
       m_condition(condition),
       m_buffer_manager(64LL * 1024 * 1024,
                        num_rows_estimate,
-                       static_cast<const Item_func *>(condition)->func_name()) {}
+                       [&]() -> const char* {
+                         if (!condition) return "semantic_filter";
+                         if (condition->type() == Item::COND_ITEM) {
+                           Item_cond_and *and_cond = static_cast<Item_cond_and*>(condition);
+                           List_iterator<Item> it(*and_cond->argument_list());
+                           Item *first_arg = it++;
+                           return static_cast<const Item_func*>(first_arg)->func_name();
+                         }
+                         return static_cast<const Item_func*>(condition)->func_name();
+                       }()) {}
 
   bool Init() override;
 
