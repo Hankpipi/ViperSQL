@@ -97,6 +97,9 @@ class Cost_model_server {
 
     return rows * m_server_cost_constants->row_evaluate_cost();
   }
+  double row_semantic_evaluate_cost(double rows) const {
+    return 10.0 * rows;
+  }
 
   /**
     Cost of doing a number of key compare operations.

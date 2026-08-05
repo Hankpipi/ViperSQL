@@ -561,17 +561,7 @@ struct POSITION {
                     "previous" stage that can be added.
     @param cm       Cost model that provides the actual calculation
   */
-  void set_prefix_join_cost(uint idx, const Cost_model_server *cm) {
-    if (idx == 0) {
-      prefix_rowcount = rows_fetched;
-      prefix_cost = read_cost + cm->row_evaluate_cost(prefix_rowcount);
-    } else {
-      prefix_rowcount = (this - 1)->prefix_rowcount * rows_fetched;
-      prefix_cost = (this - 1)->prefix_cost + read_cost +
-                    cm->row_evaluate_cost(prefix_rowcount);
-    }
-    prefix_rowcount *= filter_effect;
-  }
+  void set_prefix_join_cost(uint idx, const Cost_model_server *cm);
 
   void set_suffix_lateral_deps(table_map deps) { m_suffix_lateral_deps = deps; }
 

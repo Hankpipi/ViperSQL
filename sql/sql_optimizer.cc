@@ -114,6 +114,8 @@
 #include "sql/window.h"
 #include "sql_string.h"
 #include "template_utils.h"
+#include "sql/iterators/external_helper_interface.h"
+#include "sql/item_func_semantic.h"
 
 using std::ceil;
 using std::max;
@@ -164,6 +166,133 @@ static bool has_not_null_predicate(Item *cond, Item_field *not_null_item);
 static void measure_compilation_cpu(THD *thd, int cpu_res,
                                     timespec *beginning_id,
                                     ulonglong time_begin_wallclock);
+
+// Recursively bypasses ALL wrappers (= 1, AND, etc.) to extract semantic items
+static void extract_all_semantic_ops(Item *cond, std::vector<Item*> &ops) {
+  if (!cond) return;
+
+  if (Item *sem = find_semantic_func(cond)) {
+    ops.push_back(sem);
+  }
+
+  if (cond->type() == Item::COND_ITEM && 
+      ((Item_cond*)cond)->functype() == Item_func::COND_AND_FUNC) {
+    List_iterator<Item> li(*((Item_cond*)cond)->argument_list());
+    Item *item;
+    while ((item = li++)) {
+      extract_all_semantic_ops(item, ops);
+    }
+  }
+}
+
+static bool contains_semantic_operator(Item *condition) {
+  std::vector<Item*> ops;
+  extract_all_semantic_ops(condition, ops);
+  return !ops.empty();
+}
+
+double get_semantic_cost_for_stage(Item *condition, table_map prefix_map, 
+                                   table_map new_table_map, 
+                                   const Cost_model_server *cost_model) {
+  std::vector<Item*> ops;
+  extract_all_semantic_ops(condition, ops);
+
+  double total_cost = 0.0;
+  for (Item *sem_op : ops) {
+    table_map item_tables = sem_op->used_tables();
+    bool all_tables_present = ((item_tables & prefix_map) == item_tables);
+    bool depends_on_new_table = ((item_tables & new_table_map) != 0);
+
+    if (all_tables_present && depends_on_new_table) {
+      total_cost += sem_op->get_semantic_cost(cost_model);
+    }
+  }
+  return total_cost;
+}
+
+void POSITION::set_prefix_join_cost(uint idx, const Cost_model_server *cm) {
+  if (idx == 0) {
+    prefix_rowcount = rows_fetched;
+    prefix_cost = read_cost + cm->row_evaluate_cost(prefix_rowcount);
+  } else {
+    prefix_rowcount = (this - 1)->prefix_rowcount * rows_fetched;
+    prefix_cost = (this - 1)->prefix_cost + read_cost + cm->row_evaluate_cost(prefix_rowcount);
+  }
+
+  if (this->table->join()->has_semantic_operators) { 
+    JOIN *join = this->table->join();
+    table_map prefix_map = 0;
+    for (uint i = 0; i <= idx; i++) prefix_map |= join->positions[i].table->table_ref->map();
+    table_map new_table_map = this->table->table_ref->map();
+
+    double sem_cost = get_semantic_cost_for_stage(join->where_cond, prefix_map, new_table_map, cm);
+    if (sem_cost > 0.0) prefix_cost += prefix_rowcount * sem_cost;
+  }
+  prefix_rowcount *= filter_effect;
+}
+
+static Item* remove_semantic_operators(THD *thd, Item *cond, std::vector<Item*> *extracted) {
+  if (!cond) return nullptr;
+
+  if (cond->type() == Item::COND_ITEM && ((Item_cond*)cond)->functype() == Item_func::COND_AND_FUNC) {
+    Item_cond_and *and_cond = (Item_cond_and*)cond;
+    List_iterator<Item> li(*and_cond->argument_list());
+    Item *item;
+    List<Item> new_args;
+    
+    while ((item = li++)) {
+      Item *new_item = remove_semantic_operators(thd, item, extracted);
+      if (new_item) new_args.push_back(new_item);
+    }
+    
+    if (new_args.elements == 0) return nullptr;
+    if (new_args.elements == 1) return new_args.head();
+    
+    Item_cond_and *new_and = new (thd->mem_root) Item_cond_and(new_args);
+    return new_and;
+  }
+
+  if (contains_semantic_operator(cond)) {
+    extracted->push_back(cond);
+    return nullptr; 
+  }
+  return cond; 
+}
+
+// 1. AST Parser: Looks for a pure local filter in the global WHERE clause
+static bool has_global_pure_local_filter(Item *cond, table_map tab_map) {
+  if (!cond) return false;
+  if (cond->type() == Item::COND_ITEM && ((Item_cond*)cond)->functype() == Item_func::COND_AND_FUNC) {
+    List_iterator<Item> li(*((Item_cond*)cond)->argument_list());
+    Item *item;
+    while ((item = li++)) {
+      if (has_global_pure_local_filter(item, tab_map)) return true;
+    }
+    return false;
+  } else {
+    return (cond->used_tables() == tab_map);
+  }
+}
+
+// 2. AST Parser: Returns a bitmask of ALL tables connected to this table in the query
+static table_map get_global_table_dependencies(Item *cond, table_map tab_map) {
+  if (!cond) return 0;
+  if (cond->type() == Item::COND_ITEM && ((Item_cond*)cond)->functype() == Item_func::COND_AND_FUNC) {
+    table_map total_deps = 0;
+    List_iterator<Item> li(*((Item_cond*)cond)->argument_list());
+    Item *item;
+    while ((item = li++)) {
+      total_deps |= get_global_table_dependencies(item, tab_map);
+    }
+    return total_deps;
+  } else {
+    table_map used = cond->used_tables();
+    if ((used & tab_map) != 0) {
+      return used; // This condition touches our table, return all tables involved
+    }
+    return 0;
+  }
+}
 
 JOIN::JOIN(THD *thd_arg, Query_block *select)
     : query_block(select),
@@ -724,6 +853,32 @@ bool JOIN::optimize(bool finalize_access_paths) {
   assert(!thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER) ||
          !thd->stmt_arena->is_regular());
 
+  // =========================================================================
+  // VIPERSQL: AST SEMANTIC SCANNER
+  // Scan the entire stabilized query block exactly once before greedy search
+  // =========================================================================
+  this->has_semantic_operators = false;
+
+  // 1. Check the global WHERE clause
+  if (contains_semantic_operator(this->where_cond)) {
+    this->has_semantic_operators = true;
+  }
+  
+  // 2. Check the global HAVING clause
+  if (!this->has_semantic_operators && contains_semantic_operator(this->having_cond)) {
+    this->has_semantic_operators = true;
+  }
+
+  // 3. Check all ON clauses for Multi-Table Joins
+  if (!this->has_semantic_operators && this->join_tab) {
+    for (uint i = 0; i < this->tables; i++) {
+      if (contains_semantic_operator(this->join_tab[i].join_cond())) {
+        this->has_semantic_operators = true;
+        break;
+      }
+    }
+  } 
+
   // Set up join order and initial access paths
   THD_STAGE_INFO(thd, stage_statistics);
   if (make_join_plan()) {
@@ -818,6 +973,79 @@ bool JOIN::optimize(bool finalize_access_paths) {
     create_access_paths_for_zero_rows();
     goto setup_subq_exit;
   }
+
+  // =========================================================================
+  // VIPERSQL: THE VALLEY FINDER ALGORITHM (GLOBAL AST VERSION)
+  // =========================================================================
+  if (this->has_semantic_operators) {
+    std::vector<Item*> semantic_ops;
+    
+    this->having_cond = remove_semantic_operators(thd, this->having_cond, &semantic_ops);
+    for (uint i = 0; i < this->primary_tables; i++) {
+      Item *cleaned_cond = remove_semantic_operators(thd, this->best_ref[i]->condition(), &semantic_ops);
+      this->best_ref[i]->set_condition(cleaned_cond); 
+    }
+
+    for (Item *sem_op : semantic_ops) {
+      table_map req_tables = sem_op->used_tables();
+      uint eligibility_idx = 0;
+      table_map accumulated_map = 0;
+
+      for (uint i = 0; i < this->primary_tables; i++) {
+        accumulated_map |= this->best_ref[i]->table_ref->map();
+        if ((req_tables & accumulated_map) == req_tables) {
+          eligibility_idx = i;
+          break;
+        }
+      }
+
+      table_map current_prefix_map = 0;
+      for (uint i = 0; i <= eligibility_idx; i++) {
+        current_prefix_map |= this->best_ref[i]->table_ref->map();
+      }
+
+      uint valley_idx = eligibility_idx;
+      for (uint i = eligibility_idx + 1; i < this->primary_tables; i++) {
+        int type = this->best_ref[i]->type();
+        table_map tab_map = this->best_ref[i]->table_ref->map();
+        
+        bool is_1_to_1 = (type == JT_EQ_REF || type == JT_CONST || type == JT_SYSTEM);
+        
+        // Use Global AST Parsers instead of physical condition pointers
+        bool has_local_filter = has_global_pure_local_filter(where_cond, tab_map);
+        
+        table_map global_deps = get_global_table_dependencies(where_cond, tab_map);
+        table_map prefix_deps_mask = global_deps & current_prefix_map;
+        
+        // Count how many prefix tables this join is mathematically connected to
+        int prefix_dependencies = 0;
+        table_map temp_deps = prefix_deps_mask;
+        while (temp_deps) {
+          if (temp_deps & 1) prefix_dependencies++;
+          temp_deps >>= 1;
+        }
+        
+        bool is_intersection = (prefix_dependencies >= 2);
+
+        if (is_1_to_1 || has_local_filter || is_intersection) {
+          valley_idx = i; 
+          current_prefix_map |= tab_map; 
+        } else {
+          break; // It is a 1-to-N fan-out with only 1 dependency. STOP!
+        }
+      }
+
+      Item *current_cond = this->best_ref[valley_idx]->condition();
+      if (current_cond) {
+        Item *new_and = new (thd->mem_root) Item_cond_and(current_cond, sem_op);
+        new_and->fix_fields(thd, nullptr);
+        this->best_ref[valley_idx]->set_condition(new_and);
+      } else {
+        this->best_ref[valley_idx]->set_condition(sem_op);
+      }
+    }
+  }
+  // =========================================================================
 
   // Inject cast nodes into the WHERE conditions
   if (where_cond)

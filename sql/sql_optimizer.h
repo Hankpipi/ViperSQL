@@ -591,6 +591,9 @@ class JOIN {
   /// If true, calculate found rows for this query block
   bool calc_found_rows{false};
 
+  // True if the plan contains semantic operators, which may require special handling in the executor.
+  bool has_semantic_operators{false};
+
   /**
     This will force tmp table to NOT use index + update for group
     operation as it'll cause [de]serialization for each json aggregated
@@ -1270,4 +1273,7 @@ bool IteratorsAreNeeded(const THD *thd, AccessPath *root_path);
 double EstimateRowAccesses(const AccessPath *path, double num_evaluations,
                            double limit);
 
+double get_semantic_cost_for_stage(Item *condition, table_map prefix_map, 
+                                   table_map new_table_map, 
+                                   const Cost_model_server *cost_model);
 #endif /* SQL_OPTIMIZER_INCLUDED */

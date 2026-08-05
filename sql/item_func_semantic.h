@@ -31,6 +31,10 @@ class Item_func_semantic_filter : public Item_int_func {
 
   std::string compute_prompt();
   longlong val_int() override;
+  bool is_semantic_operator() const override { return true; }
+  double get_semantic_cost(const Cost_model_server *cm) const override { 
+    return cm->row_semantic_evaluate_cost(1.0); 
+  }
 
  protected:
   /// String used when reading JSON binary values or JSON text values.
@@ -65,6 +69,10 @@ class Item_func_semantic_generate final : public Item_func_semantic_filter {
 
   const char *func_name() const override;
   enum Functype functype() const override;
+  bool is_semantic_operator() const override { return true; }
+  double get_semantic_cost(const Cost_model_server *cm) const override { 
+    return cm->row_semantic_evaluate_cost(1.0); 
+  }
 };
 
 
@@ -88,6 +96,10 @@ public:
   std::string prompt();
   Item *left_item() const { return args[1]; }
   Item *right_item() const { return args[2]; }
+  bool is_semantic_operator() const override { return true; }
+  double get_semantic_cost(const Cost_model_server *cm) const override {
+    return cm->row_semantic_evaluate_cost(1.0);
+  }
 private:
   String m_tmp;
 };

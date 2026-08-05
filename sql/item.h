@@ -71,6 +71,7 @@
 #include "sql/trigger_def.h"  // enum_trigger_variable_type
 #include "sql_string.h"
 #include "template_utils.h"
+#include "sql/iterators/external_helper_interface.h"
 
 class Item;
 class Item_field;
@@ -822,6 +823,13 @@ struct ContainedSubquery {
   int row_width;
 };
 
+struct Semantic_cost_context {
+  table_map prefix_map;
+  table_map new_table_map;
+  const Cost_model_server *cost_model;
+  double total_cost;
+};
+
 /**
   Base class that is used to represent any kind of expression in a
   relational query. The class provides subclasses for simple components, like
@@ -1096,6 +1104,32 @@ class Item : public Parse_tree_node {
     (context-dependent) constructors.
   */
   explicit Item(const POS &);
+
+  virtual bool is_semantic_operator() const { return false; }
+  virtual double get_semantic_cost(const Cost_model_server *cm) const { return 0.0; }
+
+  bool check_semantic_processor(uchar *arg) {
+    if (this->is_semantic_operator()) {
+      *((bool*)arg) = true;
+      return true; 
+    }
+    return false;
+  }
+
+  bool calculate_semantic_cost_processor(uchar *arg) {
+    if (this->is_semantic_operator()) {
+      Semantic_cost_context *ctx = (Semantic_cost_context*)arg;
+      table_map item_tables = this->used_tables();
+
+      bool all_tables_present = ((item_tables & ctx->prefix_map) == item_tables);
+      bool depends_on_new_table = ((item_tables & ctx->new_table_map) != 0);
+
+      if (all_tables_present && depends_on_new_table) {
+         ctx->total_cost += this->get_semantic_cost(ctx->cost_model);
+      }
+    }
+    return false; 
+  }
 
 #ifdef EXTRA_DEBUG
   ~Item() override { item_name.set(0); }

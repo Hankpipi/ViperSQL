@@ -752,19 +752,24 @@ Item *CreateConjunction(List<Item> *items) {
   Return a new iterator that wraps "iterator" and that tests all of the given
   conditions (if any), ANDed together. If there are no conditions, just return
   the given iterator back.
+  
+  This version ensures standard conditions and semantic conditions are
+  placed in separate, stacked FilterAccessPaths to guarantee execution order.
  */
 AccessPath *PossiblyAttachFilter(AccessPath *path,
                                  const vector<Item *> &conditions, THD *thd,
                                  table_map *conditions_depend_on_outer_tables) {
+  List<Item> normal_items;
+  List<Item> semantic_items;
+
   // See if any of the sub-conditions are known to be always false,
   // and filter out any conditions that are known to be always true.
-  List<Item> items;
   for (Item *cond : conditions) {
     if (cond->const_item()) {
       if (cond->val_int() == 0) {
         if (ContainsAnyMRRPaths(path)) {
           // Keep the condition. See comment on ContainsAnyMRRPaths().
-          items.push_back(cond);
+          normal_items.push_back(cond);
         } else {
           return NewZeroRowsAccessPath(thd, path, "Impossible filter");
         }
@@ -772,22 +777,37 @@ AccessPath *PossiblyAttachFilter(AccessPath *path,
         // Known to be always true, so skip it.
       }
     } else {
-      items.push_back(cond);
+      // Split the conditions based on whether they contain a semantic function
+      if (find_semantic_func(cond) != nullptr) {
+        semantic_items.push_back(cond);
+      } else {
+        normal_items.push_back(cond);
+      }
     }
   }
 
-  Item *condition = CreateConjunction(&items);
-  if (condition == nullptr) {
-    return path;
+  // Layer 1: Attach standard, fast conditions directly on top of the input path
+  Item *normal_condition = CreateConjunction(&normal_items);
+  if (normal_condition != nullptr) {
+    *conditions_depend_on_outer_tables |= normal_condition->used_tables();
+    AccessPath *normal_filter_path = NewFilterAccessPath(thd, path, normal_condition);
+    
+    // NOTE: We don't care about filter_effect here, even though we should.
+    CopyBasicProperties(*path, normal_filter_path);
+    path = normal_filter_path;
   }
-  *conditions_depend_on_outer_tables |= condition->used_tables();
 
-  AccessPath *filter_path = NewFilterAccessPath(thd, path, condition);
+  // Layer 2: Attach the expensive semantic conditions above the normal conditions
+  Item *semantic_condition = CreateConjunction(&semantic_items);
+  if (semantic_condition != nullptr) {
+    *conditions_depend_on_outer_tables |= semantic_condition->used_tables();
+    AccessPath *semantic_filter_path = NewFilterAccessPath(thd, path, semantic_condition);
+    
+    CopyBasicProperties(*path, semantic_filter_path);
+    path = semantic_filter_path;
+  }
 
-  // NOTE: We don't care about filter_effect here, even though we should.
-  CopyBasicProperties(*path, filter_path);
-
-  return filter_path;
+  return path;
 }
 
 AccessPath *CreateNestedLoopAccessPath(THD *thd, AccessPath *outer,
@@ -1085,11 +1105,22 @@ void SplitConditions(Item *condition, QEP_TAB *current_table,
   Mem_root_array<Item *> condition_parts(*THR_MALLOC);
   ExtractConditions(condition, &condition_parts);
   for (Item *item : condition_parts) {
+    // =================================================================
+    // VIPERSQL: VECTOR-BATCHING PULL-UP
+    // We intercept semantic filters and push them into join_conditions to wrap the 
+    // NestedLoopJoin, preventing 1-by-1 index lookup execution.
+    // =================================================================
     if (find_semantic_func(item) != nullptr) {
-      // Delay semantic filter to the absolute top of the query block
-      predicates_above_join->push_back(PendingCondition{item, -1});
+      if (current_table->idx() > 0 && join_conditions != nullptr) {
+        join_conditions->push_back(PendingCondition{item, current_table->idx()});
+      } else if (predicates_above_join != nullptr) {
+        predicates_above_join->push_back(PendingCondition{item, current_table->idx()});
+      } else if (predicates_below_join != nullptr) {
+        predicates_below_join->push_back(item);
+      }
       continue;
     }
+    // =================================================================
     Item_func_trig_cond *trig_cond = GetTriggerCondOrNull(item);
     if (trig_cond != nullptr) {
       Item *inner_cond = trig_cond->arguments()[0];
@@ -2947,7 +2978,7 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
     // hash join iterator when we are done handling the inner side.
     SplitConditions(qep_tab->condition(), qep_tab, &predicates_below_join,
                     &predicates_above_join,
-                    replace_with_hash_join ? pending_join_conditions : nullptr,
+                    pending_join_conditions,
                     semi_join_table_idx, left_tables);
 
     // We can always do BKA. The setup is very similar to hash join.
@@ -3278,11 +3309,13 @@ AccessPath *JOIN::create_root_access_path_for_join() {
     qep_tab_map conditions_depend_on_outer_tables = 0;
     vector<PendingInvalidator> pending_invalidators;
     vector<PendingCondition> global_pending_conditions;
+    vector<PendingCondition> global_pending_join_conditions;
 
     path = ConnectJoins(
         /*upper_first_idx=*/NO_PLAN_IDX, const_tables, primary_tables, qep_tab,
         thd, TOP_LEVEL, &global_pending_conditions, &pending_invalidators,
-        /*pending_join_conditions=*/nullptr, &unhandled_duplicates,
+        /*pending_join_conditions=*/&global_pending_join_conditions,
+        &unhandled_duplicates,
         &conditions_depend_on_outer_tables);
 
     if (unhandled_duplicates != 0) {
