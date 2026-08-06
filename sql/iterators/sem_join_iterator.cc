@@ -165,6 +165,16 @@ bool SemJoinIterator::extract_join_key_for_row(bool is_probe_phase) {
 
 bool SemJoinIterator::Init() {
   log_to_file("SemJoinIterator::Init");
+  if (m_buffer_manager.FlushControl("RESET")) return true;
+  if (m_buffer_manager.Reset()) return true;
+  build_rows_buffer.clear();
+  while (!m_probe_rows_queue.empty()) m_probe_rows_queue.pop();
+  m_active_probe_row.clear();
+  m_current_loaded_probe_idx = std::numeric_limits<size_t>::max();
+  m_queue_front_global_idx = 0;
+  m_probe_input_exhausted = false;
+  m_probe_batch_flushed = false;
+
   // 1. Initialize build and probe input iterators
   PrepareForRequestRowId(m_build_input_tables.tables(),
                          m_tables_to_get_rowid_for);
@@ -227,6 +237,7 @@ bool SemJoinIterator::Init() {
 
   // 5. Switch to probe phase.
   m_buffer_manager.PopResult(); // sync build stream
+  if (m_buffer_manager.HasError()) return true;
   m_buffer_manager.SetStatus("PROBE");
   probe_idx = 0;
 
@@ -243,50 +254,93 @@ bool SemJoinIterator::Init() {
 }
 
 int SemJoinIterator::Read() {
+  // The obligation is latched for this public Read() call and is satisfied by
+  // one successful probe-batch submission before a match can be returned.
+  bool must_submit_before_pop =
+      !m_probe_input_exhausted && m_buffer_manager.ShouldRefillBeforePop();
+  bool submitted_before_pop = false;
+
   for (;;) {
-    // Always try to read one probe row each Read() call
-    int ret = m_probe_input->Read();
-    if (ret == 1) {
-      return 1;  // error
-    }
-    thd()->check_yield();
-
-    if (ret == 0) {
-      RequestRowId(m_probe_input_tables.tables(), m_tables_to_get_rowid_for);
-      if (!extract_join_key_for_row(true)) {
-        // Skip probe row with NULL join key, continue loop
-        continue;
-      }
-
-      auto probe_row_buf = store_row_to_buffer(m_probe_input_tables, m_row_size);
-      if (probe_row_buf.empty()) {
+    // Fill-first scheduling: form the next probe batch before waiting for a
+    // helper result. Queued output is still exposed one tuple at a time.
+    if (!m_probe_input_exhausted) {
+      const int ret = m_probe_input->Read();
+      if (ret == 1) {
         return 1;  // error
       }
+      thd()->check_yield();
 
-      m_probe_rows_queue.push(std::move(probe_row_buf));
+      if (ret == -1) {
+        m_probe_input_exhausted = true;
+      } else {
+        assert(ret == 0);
+        RequestRowId(m_probe_input_tables.tables(), m_tables_to_get_rowid_for);
+        if (!extract_join_key_for_row(true)) {
+          // Skip probe row with NULL join key, continue loop
+          continue;
+        }
 
-      // Push the key-index pair to GPU buffer manager
-      std::string key_copy(m_buffer.ptr(), m_buffer.length());
-      KeyIndexPair pair{key_copy, probe_idx};
-      probe_idx += 1;
-      if (m_buffer_manager.PushTuple(pair)) {
-        return 1;  // error pushing or launching kernel
+        auto probe_row_buf = store_row_to_buffer(m_probe_input_tables, m_row_size);
+        if (probe_row_buf.empty()) {
+          return 1;  // error
+        }
+
+        m_probe_rows_queue.push(std::move(probe_row_buf));
+
+        std::string key_copy(m_buffer.ptr(), m_buffer.length());
+        KeyIndexPair pair{key_copy, probe_idx};
+        probe_idx += 1;
+        bool did_submit = false;
+        if (m_buffer_manager.PushTuple(pair, &did_submit)) {
+          return 1;  // error pushing or launching kernel
+        }
+        if (did_submit) {
+          submitted_before_pop = true;
+        }
       }
-    } else if (ret == -1) {
-      // Probe input exhausted, flush any remaining probe keys
+    }
+
+    if (m_probe_input_exhausted && !m_probe_batch_flushed) {
+      // Flush exactly once; EOF submits a residual even below B_min.
       if (m_buffer_manager.FlushBatch()) {
         return 1;  // error flushing last batch
       }
+      m_probe_batch_flushed = true;
+    }
+
+    // At low output supply, first advance the probe child until PushTuple
+    // dispatches the next batch. A stocked result queue applies backpressure;
+    // EOF bypasses this gate only after the residual flush above.
+    if (!m_probe_input_exhausted && !submitted_before_pop &&
+        m_buffer_manager.ShouldRefillBeforePop()) {
+      must_submit_before_pop = true;
+    }
+    if (!m_probe_input_exhausted && must_submit_before_pop &&
+        !submitted_before_pop && m_buffer_manager.ShouldRefillBeforePop()) {
+      continue;
     }
 
     // -------------------------------------------------------
     // Processing Results
     // -------------------------------------------------------
-    auto result_pair_ptr = m_buffer_manager.PopResult();
+    std::unique_ptr<std::pair<size_t, size_t>> result_pair_ptr;
+    if (m_buffer_manager.HasReadyResult()) {
+      result_pair_ptr = m_buffer_manager.PopResult();
+    } else if (m_probe_input_exhausted) {
+      // No relational tuples remain, so it is now correct to wait for the
+      // final external request.
+      result_pair_ptr = m_buffer_manager.PopResult();
+    } else {
+      continue;
+    }
 
     if (!result_pair_ptr) {
-      if (ret == -1) return -1; // EOF
-      continue; // Wait for results
+      if (m_buffer_manager.HasError()) return 1;
+      if (m_probe_input_exhausted && !m_buffer_manager.HasPendingWork()) {
+        while (!m_probe_rows_queue.empty()) m_probe_rows_queue.pop();
+        return -1;
+      }
+      continue;
     }
 
     size_t returned_probe_idx = result_pair_ptr->first;
@@ -302,8 +356,9 @@ int SemJoinIterator::Read() {
 
     // 2. Load Probe Row
     if (returned_probe_idx == m_current_loaded_probe_idx) {
-        // HIT: Already loaded.
-        // The data is safe because it lives in 'm_active_probe_row' from the previous call.
+        // The child is advanced before output consumption, so restore the
+        // active snapshot even for another match on the same probe tuple.
+        LoadIntoTableBuffers(m_probe_input_tables, m_active_probe_row.data());
     } else {
         // MISS: Need to load new row.
         

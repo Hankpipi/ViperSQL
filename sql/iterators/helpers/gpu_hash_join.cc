@@ -205,6 +205,14 @@ bool GPUHashJoinHelper::Synchronize() {
   return false;
 }
 
+bool GPUHashJoinHelper::IsIdle() const {
+  if (stream_ == nullptr) return true;
+  const cudaError_t err = cudaStreamQuery(stream_);
+  if (err == cudaSuccess) return true;
+  if (err == cudaErrorNotReady) return false;
+  return false;
+}
+
 void GPUHashJoinHelper::Destroy() {
   if (d_keys_) {
     cudaFree(d_keys_);
@@ -235,6 +243,10 @@ void GPUHashJoinHelper::Destroy() {
 }
 
 void GPUHashJoinHelper::SetStatus(const std::string& status) {
+  if (status == "BUILD" && d_hash_table_ != nullptr) {
+    gpuhashjoinhelpers::LaunchInitHashTableKernel(
+        d_hash_table_, capacity_, NOT_FOUND, stream_);
+  }
   current_status_ = status;
   // log_to_file("GPUHashJoinHelper status set to: " + status);
 }

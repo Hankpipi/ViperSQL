@@ -6,7 +6,7 @@
 #include "sql/iterators/helpers/gpu_hash_join.h"
 #include "sql/iterators/external_helper_buffer.h"
 
-static constexpr int NUM_VECTORIZED_OPS = 0;
+static constexpr int NUM_VECTORIZED_OPS = 1;
 
 namespace gpu_temptable_aggregate_iterator {
 /**
@@ -101,6 +101,8 @@ class GPUHashJoinIterator : public RowIterator {
   ViperFlow<KeyIndexPair, uint32_t> m_buffer_manager;
   
   size_t m_row_size;
+  bool m_probe_input_exhausted{false};
+  bool m_probe_batch_flushed{false};
 
   // Extract join key from the current row of the given tables' buffers into m_buffer
   bool extract_join_key_for_row(THD* thd, const pack_rows::TableCollection& tables);
@@ -144,7 +146,10 @@ class VectorizedFilterIterator final : public RowIterator {
   void EndPSIBatchModeIfStarted() override {
     m_source->EndPSIBatchModeIfStarted();
   }
-  void UnlockRow() override { m_source->UnlockRow(); }
+  void UnlockRow() override {
+    // Rows are snapshots and the child may already have advanced. Forwarding
+    // this call could unlock a different physical row.
+  }
 
  private:
   unique_ptr_destroy_only<RowIterator> m_source;
@@ -154,6 +159,8 @@ class VectorizedFilterIterator final : public RowIterator {
   size_t m_row_size;
   std::queue<std::vector<uint8_t>> m_rows_queue;
   ViperFlow<std::string, uint8_t> m_buffer_manager;
+  bool m_source_exhausted{false};
+  bool m_final_batch_flushed{false};
 };
 
 #endif

@@ -1886,6 +1886,8 @@ bool execute_root_with_optional_batch(
 
   std::deque<RowSnapshot> row_queue;
   std::vector<std::deque<std::string>> sem_results(sem_mgrs.size());
+  std::vector<uint8_t> must_submit_before_pop(sem_mgrs.size(), 0);
+  std::vector<uint8_t> submitted_before_pop(sem_mgrs.size(), 0);
 
   auto fill_sem_cell = [&](Cell& c, const std::string& s) {
     c.type = MYSQL_TYPE_VAR_STRING;
@@ -1895,6 +1897,15 @@ bool execute_root_with_optional_batch(
   };
 
   bool upstream_done = false;
+
+  const auto reset_fill_priority = [&]() {
+    for (int fidx : sem_field_indices) {
+      must_submit_before_pop[fidx] =
+          !upstream_done && sem_mgrs[fidx]->ShouldRefillBeforePop();
+      submitted_before_pop[fidx] = 0;
+    }
+  };
+  reset_fill_priority();
 
   for (;;) {
     int ret = 0;
@@ -1917,7 +1928,11 @@ bool execute_root_with_optional_batch(
           if (is_sem_mask[j]) {
             if (auto* sf = as_semantic(it)) {
               std::string prompt = sf->compute_prompt();
-              if (sem_mgrs[j]->PushTuple(prompt)) return true;
+              bool did_submit = false;
+              if (sem_mgrs[j]->PushTuple(prompt, &did_submit)) return true;
+              if (did_submit) {
+                submitted_before_pop[j] = 1;
+              }
             } else {
               // Shouldn't happen if detection matches; treat as NULL output
             }
@@ -1936,13 +1951,41 @@ bool execute_root_with_optional_batch(
       }
     }
 
+    // Enforce low-supply fill-before-pop independently for every semantic
+    // helper. A stocked output queue applies backpressure; otherwise keep
+    // advancing until a new batch is submitted. EOF has already flushed all
+    // residuals, so result draining may proceed.
+    if (!upstream_done) {
+      bool submission_required = false;
+      for (int fidx : sem_field_indices) {
+        if (!submitted_before_pop[fidx] &&
+            sem_mgrs[fidx]->ShouldRefillBeforePop()) {
+          must_submit_before_pop[fidx] = 1;
+        }
+        submission_required |=
+            must_submit_before_pop[fidx] && !submitted_before_pop[fidx] &&
+            sem_mgrs[fidx]->ShouldRefillBeforePop();
+      }
+      if (submission_required) {
+        continue;
+      }
+    }
+
     // 3) Try to complete exactly ONE row (front) if possible.
     if (!row_queue.empty()) {
       // For each semantic field, if we don't yet have a result buffered for the front row, try to pop one from its manager.
       for (int fidx : sem_field_indices) {
-        if (sem_results[fidx].empty()) {
+        // While upstream is live, keep forming the next batch instead of
+        // turning an empty result queue into an immediate helper wait.
+        if (sem_results[fidx].empty() &&
+            (sem_mgrs[fidx]->HasReadyResult() || upstream_done)) {
           if (auto r = sem_mgrs[fidx]->PopResult()) {
             sem_results[fidx].push_back(std::move(*r));
+          }
+          if (sem_mgrs[fidx]->HasError()) return true;
+          if (upstream_done && sem_results[fidx].empty() &&
+              !sem_mgrs[fidx]->HasPendingWork()) {
+            return true;
           }
         }
       }
@@ -1969,6 +2012,7 @@ bool execute_root_with_optional_batch(
         thd->get_stmt_da()->inc_current_row_for_condition();
 
         row_queue.pop_front();
+        reset_fill_priority();
 
         // Important: emit at most one row per loop iteration to keep pipeline moving
         continue;

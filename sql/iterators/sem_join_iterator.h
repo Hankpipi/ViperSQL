@@ -135,6 +135,9 @@ class SemJoinIterator : public RowIterator {
   // to ensure pointers in table->record[0] remain valid after Read() returns.
   std::vector<uchar> m_active_probe_row;
 
+  bool m_probe_input_exhausted{false};
+  bool m_probe_batch_flushed{false};
+
   // Store the correct item for each phase
   Item* m_probe_item = nullptr;
   Item* m_build_item = nullptr;

@@ -57,6 +57,8 @@ public:
 
   bool Synchronize() override;
 
+  bool IsIdle() const override;
+
   void Destroy() override;
 
   void SetStatus(const std::string& status) override;

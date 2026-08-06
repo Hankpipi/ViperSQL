@@ -46,9 +46,17 @@ public:
   bool Init(size_t capacity) override;
   bool SubmitBatch(const void* host_data, size_t n_rows) override;
   bool FetchResults(void* out_buffer, size_t* out_result_count) override;
+  size_t ResultBufferCapacity(size_t submitted_rows) const override {
+    return m_results.size() > submitted_rows ? m_results.size() : submitted_rows;
+  }
   bool SubmitBuildDone();
   bool SubmitReset();
   bool Synchronize() override;
+  bool IsIdle() const override {
+    return !m_future.valid() ||
+           m_future.wait_for(std::chrono::seconds(0)) ==
+               std::future_status::ready;
+  }
   void Destroy() override;
   void SetStatus(const std::string& status) override;
 

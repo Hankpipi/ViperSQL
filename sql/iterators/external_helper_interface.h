@@ -49,9 +49,18 @@ public:
   /// @return true on failure, false on success
   virtual bool FetchResults(void* out_buffer, size_t* out_result_count) = 0;
 
+  /// Required host slots after Synchronize(). Helpers with fan-out override
+  /// this; one-to-one helpers use the submitted-row count.
+  virtual size_t ResultBufferCapacity(size_t submitted_rows) const {
+    return submitted_rows;
+  }
+
   /// Synchronize External Helper execution and streams
   /// @return true on failure, false on success
   virtual bool Synchronize() = 0;
+
+  /// Nonblocking readiness check for the single request owned by this helper.
+  virtual bool IsIdle() const = 0;
 
   /// Release External Helper resources
   virtual void Destroy() = 0;

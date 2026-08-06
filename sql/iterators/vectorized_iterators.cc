@@ -467,6 +467,12 @@ bool GPUHashJoinIterator::extract_join_key_for_row(THD* thd, const pack_rows::Ta
 }
 
 bool GPUHashJoinIterator::Init() {
+  if (m_buffer_manager.Reset()) return true;
+  build_rows_buffer.clear();
+  while (!m_probe_rows_queue.empty()) m_probe_rows_queue.pop();
+  m_probe_input_exhausted = false;
+  m_probe_batch_flushed = false;
+
   // 1. Initialize build and probe input iterators
   PrepareForRequestRowId(m_build_input_tables.tables(),
                          m_tables_to_get_rowid_for);
@@ -524,6 +530,7 @@ bool GPUHashJoinIterator::Init() {
 
   // 5. Switch to probe phase.
   m_buffer_manager.PopResult(); // sync build stream
+  if (m_buffer_manager.HasError()) return true;
   m_buffer_manager.SetStatus("PROBE");
 
   if (m_probe_input->Init()) {
@@ -539,70 +546,109 @@ bool GPUHashJoinIterator::Init() {
 }
 
 int GPUHashJoinIterator::Read() {
+  // This latch covers one public Read() call. Internal NOT_FOUND results do
+  // not restart the obligation or force unbounded prefetch.
+  bool must_submit_before_pop =
+      !m_probe_input_exhausted && m_buffer_manager.ShouldRefillBeforePop();
+  bool submitted_before_pop = false;
+
   for (;;) {
-    // Always try to read one probe row each Read() call
-    int ret = m_probe_input->Read();
-    if (ret == 1) {
-      return 1;  // error
-    }
-    thd()->check_yield();
-
-    if (ret == 0) {
-      RequestRowId(m_probe_input_tables.tables(), m_tables_to_get_rowid_for);
-      if (!extract_join_key_for_row(thd(), m_probe_input_tables)) {
-        // Skip probe row with NULL join key, continue loop
-        continue;
-      }
-
-      auto probe_row_buf = store_row_to_buffer(m_probe_input_tables, m_row_size);
-      if (probe_row_buf.empty()) {
+    // Fill-first scheduling: advance the relational child before consuming a
+    // queued result. If no result is ready, keep filling instead of waiting on
+    // the helper immediately after a dispatch.
+    if (!m_probe_input_exhausted) {
+      const int ret = m_probe_input->Read();
+      if (ret == 1) {
         return 1;  // error
       }
+      thd()->check_yield();
 
-      m_probe_rows_queue.push(std::move(probe_row_buf));
+      if (ret == -1) {
+        m_probe_input_exhausted = true;
+      } else {
+        assert(ret == 0);
+        RequestRowId(m_probe_input_tables.tables(), m_tables_to_get_rowid_for);
+        if (!extract_join_key_for_row(thd(), m_probe_input_tables)) {
+          // Skip probe row with NULL join key, continue loop
+          continue;
+        }
 
-      // Push the key-index pair to GPU buffer manager
-      std::string key_copy(m_buffer.ptr(), m_buffer.length());
-      uint32_t probe_idx = m_probe_rows_queue.size() - 1;
-      KeyIndexPair pair{key_copy, probe_idx};
-      if (m_buffer_manager.PushTuple(pair)) {
-        return 1;  // error pushing or launching kernel
+        auto probe_row_buf = store_row_to_buffer(m_probe_input_tables, m_row_size);
+        if (probe_row_buf.empty()) {
+          return 1;  // error
+        }
+
+        m_probe_rows_queue.push(std::move(probe_row_buf));
+
+        // Push the key-index pair to GPU buffer manager
+        std::string key_copy(m_buffer.ptr(), m_buffer.length());
+        uint32_t probe_idx = m_probe_rows_queue.size() - 1;
+        KeyIndexPair pair{key_copy, probe_idx};
+        bool did_submit = false;
+        if (m_buffer_manager.PushTuple(pair, &did_submit)) {
+          return 1;  // error pushing or launching kernel
+        }
+        if (did_submit) {
+          submitted_before_pop = true;
+        }
       }
-    } else if (ret == -1) {
-      // Probe input exhausted, flush any remaining probe keys
+    }
+
+    if (m_probe_input_exhausted && !m_probe_batch_flushed) {
+      // Flush exactly once. EOF overrides B_min for the residual batch.
       if (m_buffer_manager.FlushBatch()) {
         return 1;  // error flushing last batch
       }
+      m_probe_batch_flushed = true;
     }
 
-    // Now try to get one matched result
-    auto matched_build_idx_ptr = m_buffer_manager.PopResult();
+    // At low output supply, an idle helper blocks this pop until the child has
+    // supplied a new batch. A stocked result queue applies backpressure and
+    // bypasses refilling; EOF drains only after the residual flush above.
+    if (!m_probe_input_exhausted && !submitted_before_pop &&
+        m_buffer_manager.ShouldRefillBeforePop()) {
+      must_submit_before_pop = true;
+    }
+    if (!m_probe_input_exhausted && must_submit_before_pop &&
+        !submitted_before_pop && m_buffer_manager.ShouldRefillBeforePop()) {
+      continue;
+    }
+
+    std::unique_ptr<uint32_t> matched_build_idx_ptr;
+    if (m_buffer_manager.HasReadyResult()) {
+      matched_build_idx_ptr = m_buffer_manager.PopResult();
+    } else if (m_probe_input_exhausted) {
+      // With no more relational work available, drain the final request.
+      matched_build_idx_ptr = m_buffer_manager.PopResult();
+    } else {
+      continue;
+    }
 
     if (!matched_build_idx_ptr) {
-      // If probe iterator exhausted and no results are available,
-      // then this is end of stream
-      if (ret == -1) {
+      if (m_buffer_manager.HasError()) return 1;
+      if (m_probe_input_exhausted && !m_buffer_manager.HasPendingWork()) {
+        if (!m_probe_rows_queue.empty()) {
+          return 1;
+        }
         return -1;  // no more rows
       }
-
-      // Otherwise no result yet, wait for GPU batch to be running
-      if (!m_buffer_manager.IsExternalCallRunning()) {
-        // Not running yet, continue reading more probe rows (loop)
-        continue;
-      }
-
-      // GPU batch is running, but no results available yet — return 0 indicating no row ready now
-      return 0;
+      continue;
     }
 
     // Got a matched build index, skip if NOT_FOUND
     if (*matched_build_idx_ptr == gpuhashjoinhelpers::NOT_FOUND) {
       // Ignore and continue loop to get next match
+      if (m_probe_rows_queue.empty()) {
+        return 1;
+      }
       m_probe_rows_queue.pop();
       continue;
     }
 
     // Load matched build row to build tables
+    if (*matched_build_idx_ptr >= build_rows_buffer.size()) {
+      return 1;
+    }
     LoadIntoTableBuffers(m_build_input_tables, build_rows_buffer[*matched_build_idx_ptr].data());
 
     // Load corresponding probe row to probe tables
@@ -621,18 +667,32 @@ int GPUHashJoinIterator::Read() {
 }
 
 bool VectorizedFilterIterator::Init() {
+  if (m_buffer_manager.Reset()) return true;
+  while (!m_rows_queue.empty()) m_rows_queue.pop();
+  m_source_exhausted = false;
+  m_final_batch_flushed = false;
   m_row_size = ComputeRowSizeUpperBound(m_tables);
   return m_source->Init();
 }
 
 int VectorizedFilterIterator::Read() {
-  for (;;) {
-    int ret = m_source->Read();
-    if (ret == 1)    
-      return 1;
-    thd()->check_yield();
+  // This latch covers one public Read() call. Rejected predicates remain part
+  // of the same call and therefore cannot demand another pre-pop submission.
+  bool must_submit_before_pop =
+      !m_source_exhausted && m_buffer_manager.ShouldRefillBeforePop();
+  bool submitted_before_pop = false;
 
-    if (ret == 0) {
+  for (;;) {
+    if (!m_source_exhausted) {
+      const int ret = m_source->Read();
+
+      if (ret == 1) return 1;
+      thd()->check_yield();
+
+      if (ret == -1) {
+        m_source_exhausted = true;
+      } else {
+        assert(ret == 0);
       // 1a) pack it into an in-memory buffer
       auto row_buf = store_row_to_buffer(m_tables, m_row_size);
       if (row_buf.empty()) {
@@ -665,37 +725,68 @@ int VectorizedFilterIterator::Read() {
       }
 
       // 1c) submit the cleanly joined prompt to the LLM helper
-      if (m_buffer_manager.PushTuple(prompt)) {
+      bool did_submit = false;
+      if (m_buffer_manager.PushTuple(prompt, &did_submit)) {
         log_to_file("VectorizedFilterIterator: PushTuple failed");
         return 1;
       }
+      if (did_submit) {
+        submitted_before_pop = true;
+      }
+      }
     }
-    else if (ret == -1) {
-      // upstream exhausted -> flush final batch
+
+    if (m_source_exhausted && !m_final_batch_flushed) {
+      // Upstream exhausted: flush once, including a residual below B_min.
       if (m_buffer_manager.FlushBatch()) {
         log_to_file("VectorizedFilterIterator: FlushBatch failed");
         return 1;
       }
+      m_final_batch_flushed = true;
     }
 
-    // 2) try to fetch one boolean result
-    auto res_ptr = m_buffer_manager.PopResult();
+    // At low output supply, preserve queued output while an observed-idle
+    // helper needs more input. A stocked result queue bypasses refilling to
+    // avoid starving outer iterators; EOF follows the residual flush above.
+    if (!m_source_exhausted && !submitted_before_pop &&
+        m_buffer_manager.ShouldRefillBeforePop()) {
+      must_submit_before_pop = true;
+    }
+    if (!m_source_exhausted && must_submit_before_pop &&
+        !submitted_before_pop && m_buffer_manager.ShouldRefillBeforePop()) {
+      continue;
+    }
+
+    std::unique_ptr<uint8_t> res_ptr;
+    if (m_buffer_manager.HasReadyResult()) {
+      res_ptr = m_buffer_manager.PopResult();
+    } else if (m_source_exhausted) {
+      // Only block once there is no more relational input to form a batch.
+      res_ptr = m_buffer_manager.PopResult();
+    } else {
+      continue;
+    }
+
     if (!res_ptr) {
-      // no result yet
-      if (ret == -1) 
-        return -1; // done
-      if (!m_buffer_manager.IsExternalCallRunning())
-        continue;
-      return 0;
+      if (m_buffer_manager.HasError()) return 1;
+      if (m_source_exhausted && !m_buffer_manager.HasPendingWork()) {
+        if (!m_rows_queue.empty()) {
+          return 1;
+        }
+        return -1;
+      }
+      continue;
     }
 
     // 3) we have a definitive true/false
+    if (m_rows_queue.empty()) {
+      return 1;
+    }
     bool matched = (*res_ptr != 0);
     auto row_buf = std::move(m_rows_queue.front());
     m_rows_queue.pop();
 
     if (!matched) {
-      m_source->UnlockRow();
       continue;
     }
 
