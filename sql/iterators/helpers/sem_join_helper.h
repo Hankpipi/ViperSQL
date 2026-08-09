@@ -19,67 +19,55 @@
    Boston, MA  02111-1307  USA
 */
 
-#include "sql/iterators/external_helper_interface.h"
-#include <string>
-#include <vector>
-#include <future>
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
-#include <unordered_map>
+#include <future>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "sql/iterators/external_helper_interface.h"
 
 namespace semhelpers {
 
 struct KeyIndexPair {
-  std::string key; // Join key
-  size_t index;  // Index of the full row in CPU build buffer
+  std::string key;
+  size_t index;
 };
 
-/**
- * SemJoinHelper
- * A configurable semantic join helper that calls different backends
- * by switching the model name in the request JSON.
- */
 class SemJoinHelper : public ExternalHelperInterface {
-public:
-  explicit SemJoinHelper(std::string model_name);
+ public:
+  SemJoinHelper(std::string model_name, std::string predicate);
   ~SemJoinHelper() override;
 
-  bool Init(size_t capacity) override;
-  bool SubmitBatch(const void* host_data, size_t n_rows) override;
-  bool FetchResults(void* out_buffer, size_t* out_result_count) override;
+  bool Init() override;
+  bool SubmitBatch(const void *host_data, size_t n_rows) override;
+  bool FetchResults(void *out_buffer, size_t *out_result_count) override;
   size_t ResultBufferCapacity(size_t submitted_rows) const override {
-    return m_results.size() > submitted_rows ? m_results.size() : submitted_rows;
+    return std::max(m_results.size(), submitted_rows);
   }
-  bool SubmitBuildDone();
-  bool SubmitReset();
   bool Synchronize() override;
   bool IsIdle() const override {
-    return !m_future.valid() ||
-           m_future.wait_for(std::chrono::seconds(0)) ==
-               std::future_status::ready;
+    return !m_future.valid() || m_future.wait_for(std::chrono::seconds(0)) ==
+                                    std::future_status::ready;
   }
   void Destroy() override;
-  void SetStatus(const std::string& status) override;
+  void SetStatus(const std::string &status) override;
 
-  void SetPredicate(std::string predicate);
-  void SetModelName(std::string model_name);
-  const std::string& GetModelName();
-  void SetJoinId(std::string join_id);
-  const std::string& GetJoinId() const;
+ private:
+  bool SubmitBuildBatch(const void *host_data, size_t n_rows);
+  bool SubmitProbeBatch(const void *host_data, size_t n_rows);
+  bool SubmitBuildDone();
+  bool SubmitReset();
 
-private:
-
-  bool SubmitBuildBatch(const void* host_data, size_t n_rows);
-  bool SubmitProbeBatch(const void* host_data, size_t n_rows);
-
-  std::string          m_model_name;     // backend model name
-  std::string          m_predicate;      // predicate string
-  size_t               m_capacity{0};    // max batch size
-  size_t               m_expected_count{0};
-  std::string          m_raw_response;   // raw JSON (stringified) from server
-  std::vector<std::pair<size_t, size_t>> m_results;        // parsed int pair results
-  std::future<void>    m_future;
-  std::string          m_status;
-  std::string          m_join_id;
+  const std::string m_model_name;
+  const std::string m_predicate;
+  std::vector<std::pair<size_t, size_t>> m_results;
+  std::future<void> m_future;
+  bool m_failed{false};
+  std::string m_status;
+  const std::string m_join_id;
 };
 
 }  // namespace semhelpers

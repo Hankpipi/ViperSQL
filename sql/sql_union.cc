@@ -96,9 +96,6 @@
 #include "sql/visible_fields.h"
 #include "sql/window.h"  // Window
 #include "template_utils.h"
-#include "sql/iterators/external_helper_interface.h"
-#include "sql/iterators/external_helper_buffer.h"
-#include "sql/item_func_semantic.h"
 
 using std::vector;
 
@@ -1668,370 +1665,6 @@ bool Query_expression::ClearForExecution() {
   return false;
 }
 
-static inline bool is_semantic(Item* it) {
-  if (!it) return false;
-  if (auto* f = dynamic_cast<Item_int_func*>(it)) {
-    const char* fn = f->func_name();
-    return fn && strstr(fn, "semantic");
-  }
-  return false;
-}
-
-static inline Item_func_semantic_filter* as_semantic(Item* it) {
-  return dynamic_cast<Item_func_semantic_filter*>(it);
-}
-
-// A cell snapshot, used both for non-semantic values and to hold semantic outputs.
-struct Cell {
-  enum_field_types type{MYSQL_TYPE_VAR_STRING};
-  bool is_null{true};
-  bool unsigned_flag{false};
-  int  decimals{0};
-  longlong i64{0};
-  double   d64{0};
-  MYSQL_TIME tm{};
-  std::string sbytes;
-  const CHARSET_INFO* cset{&my_charset_bin};
-};
-using RowSnapshot = std::vector<Cell>;
-
-static RowSnapshot snapshot_nonsemantic_from_fields(
-    const mem_root_deque<Item*>& fields,
-    const std::vector<uint8_t>& is_sem_mask) {
-
-  RowSnapshot out; out.reserve(fields.size());
-
-  char buf[MAX_FIELD_WIDTH];
-  String str_buf(buf, sizeof(buf), &my_charset_bin);
-
-  size_t j = 0;
-  for (Item* item : VisibleFields(fields)) {
-    const bool sem = is_sem_mask[j++] != 0;
-    Cell c{};
-
-    if (sem) {
-      // Placeholder for semantic output (string)
-      c.type = MYSQL_TYPE_VAR_STRING;
-      c.is_null = true;
-      out.emplace_back(std::move(c));
-      continue;
-    }
-
-    c.type = item->data_type();
-    c.unsigned_flag = item->unsigned_flag;
-    c.decimals = item->decimals;
-
-    switch (c.type) {
-      default:
-        [[fallthrough]];
-      case MYSQL_TYPE_NULL: case MYSQL_TYPE_BOOL: case MYSQL_TYPE_INVALID:
-      case MYSQL_TYPE_DECIMAL: case MYSQL_TYPE_ENUM: case MYSQL_TYPE_SET:
-      case MYSQL_TYPE_TINY_BLOB: case MYSQL_TYPE_MEDIUM_BLOB:
-      case MYSQL_TYPE_LONG_BLOB: case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_GEOMETRY: case MYSQL_TYPE_STRING:
-      case MYSQL_TYPE_VAR_STRING: case MYSQL_TYPE_VARCHAR:
-      case MYSQL_TYPE_BIT: case MYSQL_TYPE_NEWDECIMAL: case MYSQL_TYPE_JSON: {
-        const String* res = item->val_str(&str_buf);
-        if (res) {
-          c.is_null = false;
-          c.sbytes.assign(res->ptr(), res->length());
-          c.cset = res->charset();
-        } else {
-          c.is_null = true;
-        }
-        str_buf.set(buf, sizeof(buf), &my_charset_bin);
-        break;
-      }
-      case MYSQL_TYPE_TINY:
-      case MYSQL_TYPE_SHORT: case MYSQL_TYPE_YEAR:
-      case MYSQL_TYPE_INT24: case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG: {
-        longlong v = item->val_int();
-        c.is_null = item->null_value;
-        if (!c.is_null) c.i64 = v;
-        break;
-      }
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DOUBLE: {
-        double v = item->val_real();
-        c.is_null = item->null_value;
-        if (!c.is_null) c.d64 = v;
-        break;
-      }
-      case MYSQL_TYPE_DATE:
-      case MYSQL_TYPE_DATETIME:
-      case MYSQL_TYPE_TIMESTAMP: {
-        item->get_date(&c.tm, TIME_FUZZY_DATE);
-        c.is_null = item->null_value;
-        break;
-      }
-      case MYSQL_TYPE_TIME: {
-        item->get_time(&c.tm);
-        c.is_null = item->null_value;
-        break;
-      }
-    }
-
-    out.emplace_back(std::move(c));
-  }
-  return out;
-}
-
-static bool send_snapshot_row(THD* thd, const RowSnapshot& row) {
-  Protocol* protocol = thd->get_protocol();
-  protocol->start_row();
-
-  for (const Cell& c : row) {
-    if (c.is_null) { if (protocol->store_null()) { protocol->abort_row(); return true; } continue; }
-    switch (c.type) {
-      default: // treat as string-like
-      case MYSQL_TYPE_NULL: case MYSQL_TYPE_BOOL: case MYSQL_TYPE_INVALID:
-      case MYSQL_TYPE_DECIMAL: case MYSQL_TYPE_ENUM: case MYSQL_TYPE_SET:
-      case MYSQL_TYPE_TINY_BLOB: case MYSQL_TYPE_MEDIUM_BLOB:
-      case MYSQL_TYPE_LONG_BLOB: case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_GEOMETRY: case MYSQL_TYPE_STRING:
-      case MYSQL_TYPE_VAR_STRING: case MYSQL_TYPE_VARCHAR:
-      case MYSQL_TYPE_BIT: case MYSQL_TYPE_NEWDECIMAL: case MYSQL_TYPE_JSON:
-        if (protocol->store_string(c.sbytes.data(), c.sbytes.size(), c.cset)) { protocol->abort_row(); return true; }
-        break;
-
-      case MYSQL_TYPE_TINY:
-        if (protocol->store_tiny(c.i64)) { protocol->abort_row(); return true; } break;
-      case MYSQL_TYPE_SHORT: case MYSQL_TYPE_YEAR:
-        if (protocol->store_short(c.i64)) { protocol->abort_row(); return true; } break;
-      case MYSQL_TYPE_INT24: case MYSQL_TYPE_LONG:
-        if (protocol->store_long(c.i64)) { protocol->abort_row(); return true; } break;
-      case MYSQL_TYPE_LONGLONG:
-        if (protocol->store_longlong(c.i64, c.unsigned_flag)) { protocol->abort_row(); return true; } break;
-
-      case MYSQL_TYPE_FLOAT:
-        if (protocol->store_float(static_cast<float>(c.d64), c.decimals, 0)) { protocol->abort_row(); return true; } break;
-      case MYSQL_TYPE_DOUBLE:
-        if (protocol->store_double(c.d64, c.decimals, 0)) { protocol->abort_row(); return true; } break;
-
-      case MYSQL_TYPE_DATE:
-        if (protocol->store_date(c.tm)) { protocol->abort_row(); return true; } break;
-      case MYSQL_TYPE_DATETIME: case MYSQL_TYPE_TIMESTAMP:
-        if (protocol->store_datetime(c.tm, c.decimals)) { protocol->abort_row(); return true; } break;
-      case MYSQL_TYPE_TIME:
-        if (protocol->store_time(c.tm, c.decimals)) { protocol->abort_row(); return true; } break;
-    }
-  }
-
-  thd->inc_sent_row_count(1);
-  return protocol->end_row();  // true => error
-}
-
-// Main: choose row-by-row vs. batch; in batch, emit at most ONE tuple per loop.
-bool execute_root_with_optional_batch(
-    THD* thd,
-    Query_result_send* query_result,
-    mem_root_deque<Item*>* fields,
-    RowIterator* m_root_row_iterator,
-    ulonglong* send_records_ptr) {
-
-  // Discover semantic fields; build one manager per semantic field (generic class, current instantiation is <std::string,std::string>)
-  std::vector<uint8_t> is_sem_mask; is_sem_mask.reserve(fields->size());
-  std::vector<int> sem_field_indices; sem_field_indices.reserve(fields->size());
-
-  // Managers are indexed by field position; nullptr for non-semantic fields
-  std::vector<std::unique_ptr<ViperFlow<std::string,std::string>>> sem_mgrs(fields->size());
-
-  {
-    bool any_sem = false;
-    size_t i = 0;
-    for (Item* it : VisibleFields(*fields)) {
-      const bool sem = is_semantic(it);
-      is_sem_mask.push_back(sem ? 1 : 0);
-      if (sem) {
-        any_sem = true;
-        sem_field_indices.push_back(static_cast<int>(i));
-
-        // Fixed params (not used by semantic helper, per your note)
-        static constexpr size_t kHelperMaxMem = 64ULL * 1024ULL * 1024ULL;
-        static constexpr size_t kEstimatedRows = 1024ULL;
-        const char* fn = nullptr;
-        if (auto* f = dynamic_cast<Item_int_func*>(it)) fn = f->func_name();
-        std::string helper_name = fn ? std::string(fn) : std::string("semantic_helper");
-
-        sem_mgrs[i] = std::make_unique<ViperFlow<std::string,std::string>>(
-            kHelperMaxMem, kEstimatedRows, helper_name);
-      }
-      ++i;
-    }
-
-    if (!any_sem) {
-      // Original tuple-at-a-time path
-      for (;;) {
-        int error = m_root_row_iterator->Read();
-        DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
-
-        if (error > 0 || thd->is_error()) return true;
-        if (error < 0) break;
-        if (thd->killed) { thd->send_kill_message(); return true; }
-
-        thd->check_yield();
-        ++*send_records_ptr;
-
-        if (query_result->send_data(thd, *fields)) return true;
-        thd->get_stmt_da()->inc_current_row_for_condition();
-      }
-      return false;
-    }
-  }
-
-  // Batch path: per-field tiny holding queues (so we never "drain", we only take at most one per field per loop)
-  const CHARSET_INFO* out_charset = thd->variables.collation_connection;
-  if (!out_charset) out_charset = &my_charset_utf8mb4_bin;
-
-  std::deque<RowSnapshot> row_queue;
-  std::vector<std::deque<std::string>> sem_results(sem_mgrs.size());
-  std::vector<uint8_t> must_submit_before_pop(sem_mgrs.size(), 0);
-  std::vector<uint8_t> submitted_before_pop(sem_mgrs.size(), 0);
-
-  auto fill_sem_cell = [&](Cell& c, const std::string& s) {
-    c.type = MYSQL_TYPE_VAR_STRING;
-    c.is_null = false;
-    c.sbytes = s;
-    c.cset = out_charset;
-  };
-
-  bool upstream_done = false;
-
-  const auto reset_fill_priority = [&]() {
-    for (int fidx : sem_field_indices) {
-      must_submit_before_pop[fidx] =
-          !upstream_done && sem_mgrs[fidx]->ShouldRefillBeforePop();
-      submitted_before_pop[fidx] = 0;
-    }
-  };
-  reset_fill_priority();
-
-  for (;;) {
-    int ret = 0;
-
-    if (!upstream_done) {
-      ret = m_root_row_iterator->Read();
-      DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
-
-      if (ret > 0 || thd->is_error()) return true;   // fatal
-      if (thd->killed) { thd->send_kill_message(); return true; }
-      thd->check_yield();
-
-      if (ret == 0) {
-        // 1) Snapshot non-semantic fields; placeholders for semantic ones
-        RowSnapshot snap = snapshot_nonsemantic_from_fields(*fields, is_sem_mask);
-
-        // 2) For each semantic field, compute prompt and push to its own manager
-        size_t j = 0;
-        for (Item* it : VisibleFields(*fields)) {
-          if (is_sem_mask[j]) {
-            if (auto* sf = as_semantic(it)) {
-              std::string prompt = sf->compute_prompt();
-              bool did_submit = false;
-              if (sem_mgrs[j]->PushTuple(prompt, &did_submit)) return true;
-              if (did_submit) {
-                submitted_before_pop[j] = 1;
-              }
-            } else {
-              // Shouldn't happen if detection matches; treat as NULL output
-            }
-          }
-          ++j;
-        }
-
-        // Queue the row for later completion (front-first policy)
-        row_queue.push_back(std::move(snap));
-      } else { // ret < 0
-        // Upstream exhausted: flush all semantic managers
-        for (int fidx : sem_field_indices) {
-          if (sem_mgrs[fidx] && sem_mgrs[fidx]->FlushBatch()) return true;
-        }
-        upstream_done = true;
-      }
-    }
-
-    // Enforce low-supply fill-before-pop independently for every semantic
-    // helper. A stocked output queue applies backpressure; otherwise keep
-    // advancing until a new batch is submitted. EOF has already flushed all
-    // residuals, so result draining may proceed.
-    if (!upstream_done) {
-      bool submission_required = false;
-      for (int fidx : sem_field_indices) {
-        if (!submitted_before_pop[fidx] &&
-            sem_mgrs[fidx]->ShouldRefillBeforePop()) {
-          must_submit_before_pop[fidx] = 1;
-        }
-        submission_required |=
-            must_submit_before_pop[fidx] && !submitted_before_pop[fidx] &&
-            sem_mgrs[fidx]->ShouldRefillBeforePop();
-      }
-      if (submission_required) {
-        continue;
-      }
-    }
-
-    // 3) Try to complete exactly ONE row (front) if possible.
-    if (!row_queue.empty()) {
-      // For each semantic field, if we don't yet have a result buffered for the front row, try to pop one from its manager.
-      for (int fidx : sem_field_indices) {
-        // While upstream is live, keep forming the next batch instead of
-        // turning an empty result queue into an immediate helper wait.
-        if (sem_results[fidx].empty() &&
-            (sem_mgrs[fidx]->HasReadyResult() || upstream_done)) {
-          if (auto r = sem_mgrs[fidx]->PopResult()) {
-            sem_results[fidx].push_back(std::move(*r));
-          }
-          if (sem_mgrs[fidx]->HasError()) return true;
-          if (upstream_done && sem_results[fidx].empty() &&
-              !sem_mgrs[fidx]->HasPendingWork()) {
-            return true;
-          }
-        }
-      }
-
-      // Check readiness of the front row
-      bool ready = true;
-      for (int fidx : sem_field_indices) {
-        if (sem_results[fidx].empty()) { ready = false; break; }
-      }
-
-      if (ready) {
-        RowSnapshot& front = row_queue.front();
-
-        // Fill semantic outputs (consume exactly one from each)
-        for (int fidx : sem_field_indices) {
-          std::string out = std::move(sem_results[fidx].front());
-          sem_results[fidx].pop_front();
-          fill_sem_cell(front[fidx], out);
-        }
-
-        // Emit ONE tuple to client
-        if (send_snapshot_row(thd, front)) return true;
-        ++*send_records_ptr;
-        thd->get_stmt_da()->inc_current_row_for_condition();
-
-        row_queue.pop_front();
-        reset_fill_priority();
-
-        // Important: emit at most one row per loop iteration to keep pipeline moving
-        continue;
-      }
-    }
-
-    // 4) Exit condition: if upstream is done AND nothing left to emit AND no helpers running.
-    if (upstream_done && row_queue.empty()) {
-      bool any_running = false;
-      for (int fidx : sem_field_indices) {
-        any_running |= (sem_mgrs[fidx] && sem_mgrs[fidx]->IsExternalCallRunning());
-      }
-      if (!any_running) return false;
-    }
-
-    // Otherwise loop: keep reading (if not done) and lightly polling PopResult() once per field per turn.
-  }
-}
-
 bool Query_expression::ExecuteIteratorQuery(THD *thd) {
   THD_STAGE_INFO(thd, stage_executing);
   DEBUG_SYNC(thd, "before_join_exec");
@@ -2133,42 +1766,32 @@ bool Query_expression::ExecuteIteratorQuery(THD *thd) {
 
     PFSBatchMode pfs_batch_mode(m_root_iterator.get());
 
-    // Prefer the batch path that can substitute semantic-generated fields,
-    // falling back to the original tuple-at-a-time path if not a Query_result_send.
-    if (auto *send_qr = dynamic_cast<Query_result_send*>(query_result)) {
-      if (execute_root_with_optional_batch(
-              thd,
-              send_qr,
-              fields,
-              m_root_iterator.get(),
-              send_records_ptr)) {
+    for (;;) {
+      int error = m_root_iterator->Read();
+      DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
+
+      if (error > 0 || thd->is_error())  // Fatal error
+        return true;
+      else if (error < 0)
+        break;
+      else if (thd->killed)  // Aborted by user
+      {
+        thd->send_kill_message();
         return true;
       }
-    } else {
-      for (;;) {
-        int error = m_root_iterator->Read();
-        DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
 
-        if (error > 0 || thd->is_error())
-          return true;                 // Fatal error
-        else if (error < 0)
-          break;                       // EOF
-        else if (thd->killed) {        // Aborted by user
-          thd->send_kill_message();
-          return true;
-        }
+      thd->check_yield();
 
-        thd->check_yield();
+      ++*send_records_ptr;
 
-        ++*send_records_ptr;
-
-        if (query_result->send_data(thd, *fields)) {
-          return true;
-        }
-        thd->get_stmt_da()->inc_current_row_for_condition();
+      if (query_result->send_data(thd, *fields)) {
+        return true;
       }
+      thd->get_stmt_da()->inc_current_row_for_condition();
     }
-    // NOTE: join_cleanup must be done before we send EOF, so row counts are right.
+
+    // NOTE: join_cleanup must be done before we send EOF, so that we get the
+    // row counts right.
   }
 
   thd->current_found_rows = *send_records_ptr;

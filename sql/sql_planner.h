@@ -30,6 +30,8 @@
 
 #include <sys/types.h>
 
+#include <vector>
+
 #include "my_inttypes.h"
 #include "my_table_map.h"
 #include "sql_optimizer.h"
@@ -127,6 +129,35 @@ class Optimize_table_order {
 
   /// True if we found a complete plan using only allowed semijoin strategies.
   bool found_plan_with_allowed_sj;
+
+  /// Lowest refined semantic cost seen in the current complete-plan search.
+  double best_semantic_refined_cost_seen;
+
+  /// Estimated helper batches for the complete plan in best_positions.
+  uint64_t best_semantic_batch_count;
+
+  /// Optional, non-unique, statistically untrusted prefix tables.
+  uint best_semantic_uncertain_fanout_tables;
+
+  /// Whether every relevant prefix table had classifiable fanout evidence.
+  bool best_semantic_fanout_risk_evidence_valid;
+
+  /// First non-const relation in the fanout evidence for best_positions.
+  table_map best_semantic_fanout_root_table;
+
+  /// Semantic iterator groups trapped in a buffered join's build subtree.
+  uint best_semantic_buffered_build_groups;
+
+  /// Cumulative corrected intermediate-cardinality score of best_positions.
+  double best_semantic_intermediate_cardinality_score;
+
+  /// Logical relation-set input of each semantic group in best_positions.
+  std::vector<table_map> best_semantic_group_input_tables;
+
+  /// Per-group evidence used to prove equal semantic work before risk ties.
+  std::vector<double> best_semantic_group_input_rows;
+  std::vector<uint64_t> best_semantic_group_batch_counts;
+  std::vector<size_t> best_semantic_group_predicate_counts;
 
   /**
     False/true at start/end of choose_table_order().

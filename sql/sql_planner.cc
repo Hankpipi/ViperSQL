@@ -39,7 +39,7 @@
 #include <limits.h>
 #include <string.h>
 #include <algorithm>
-#include <atomic>
+#include <cmath>
 
 #include "my_base.h"  // key_part_map
 #include "my_bit.h"   // my_count_bits
@@ -48,6 +48,7 @@
 #include "my_dbug.h"
 #include "my_double2ulonglong.h"
 #include "my_macros.h"
+#include "mysqld_error.h"
 #include "sql/enum_query_type.h"
 #include "sql/field.h"
 #include "sql/handler.h"
@@ -65,6 +66,8 @@
 #include "sql/query_result.h"
 #include "sql/range_optimizer/path_helpers.h"
 #include "sql/range_optimizer/range_optimizer.h"
+#include "sql/semantic_plan_tiebreak_policy.h"
+#include "sql/semantic_profile.h"
 #include "sql/sql_bitmap.h"
 #include "sql/sql_class.h"  // THD
 #include "sql/sql_const.h"
@@ -78,7 +81,6 @@
 #include "sql/table.h"
 #include "sql/window.h"
 #include "sql_string.h"
-#include "sql/iterators/external_helper_interface.h"
 
 using std::max;
 using std::min;
@@ -126,9 +128,15 @@ Optimize_table_order::Optimize_table_order(THD *thd_arg, JOIN *join_arg,
                                            Table_ref *sjm_nest_arg)
     : thd(thd_arg),
       join(join_arg),
-      search_depth(determine_search_depth(thd->variables.optimizer_search_depth,
-                                          join->tables - join->const_tables)),
-      prune_level(thd->variables.optimizer_prune_level),
+      search_depth(
+          join_arg->has_semantic_operators
+              ? join_arg->tables - join_arg->const_tables + 1
+              : determine_search_depth(
+                    thd->variables.optimizer_search_depth,
+                    join->tables - join->const_tables)),
+      prune_level(join_arg->has_semantic_operators
+                      ? 0
+                      : thd->variables.optimizer_prune_level),
       cur_embedding_map(0),
       emb_sjm_nest(sjm_nest_arg),
       excluded_tables(
@@ -138,6 +146,17 @@ Optimize_table_order::Optimize_table_order(THD *thd_arg, JOIN *join_arg,
       has_sj(!(join->query_block->sj_nests.empty() || emb_sjm_nest)),
       test_all_ref_keys(false),
       found_plan_with_allowed_sj(false),
+      best_semantic_refined_cost_seen(DBL_MAX),
+      best_semantic_batch_count(0),
+      best_semantic_uncertain_fanout_tables(0),
+      best_semantic_fanout_risk_evidence_valid(true),
+      best_semantic_fanout_root_table(0),
+      best_semantic_buffered_build_groups(0),
+      best_semantic_intermediate_cardinality_score(DBL_MAX),
+      best_semantic_group_input_tables(),
+      best_semantic_group_input_rows(),
+      best_semantic_group_batch_counts(),
+      best_semantic_group_predicate_counts(),
       got_final_plan(false) {}
 
 double find_cost_for_ref(const THD *thd, TABLE *table, unsigned keyno,
@@ -2356,6 +2375,17 @@ bool Optimize_table_order::greedy_search(table_map remaining_tables) {
     join->best_read = DBL_MAX;
     join->best_rowcount = HA_POS_ERROR;
     found_plan_with_allowed_sj = false;
+    best_semantic_refined_cost_seen = DBL_MAX;
+    best_semantic_batch_count = 0;
+    best_semantic_uncertain_fanout_tables = 0;
+    best_semantic_fanout_risk_evidence_valid = true;
+    best_semantic_fanout_root_table = 0;
+    best_semantic_buffered_build_groups = 0;
+    best_semantic_intermediate_cardinality_score = DBL_MAX;
+    best_semantic_group_input_tables.clear();
+    best_semantic_group_input_rows.clear();
+    best_semantic_group_batch_counts.clear();
+    best_semantic_group_predicate_counts.clear();
     if (best_extension_by_limited_search(remaining_tables, idx, search_depth))
       return true;
     /*
@@ -2363,6 +2393,14 @@ bool Optimize_table_order::greedy_search(table_map remaining_tables) {
       some plan and updated 'best_positions' array accordingly.
     */
     assert(join->best_read < DBL_MAX);
+    if (join->best_read == DBL_MAX) {
+      // Release builds compile out the assertion above. Without this guard,
+      // get_best_combination() would later dereference an uninitialized
+      // best_positions entry after every complete semantic plan was rejected.
+      my_error(ER_INTERNAL_ERROR, MYF(0),
+               "optimizer found no feasible semantic query plan");
+      return true;
+    }
 
     if (size_remain <= search_depth || use_best_so_far) {
       /*
@@ -2487,8 +2525,21 @@ void get_partial_join_cost(JOIN *join, uint n_tables, double *cost_arg,
 bool Optimize_table_order::consider_plan(uint idx,
                                          Opt_trace_object *trace_obj) {
   double cost = join->positions[idx].prefix_cost;
+  const double native_candidate_cost = cost;
+  double candidate_rowcount = join->positions[idx].prefix_rowcount;
   double sort_cost = 0;
   double windowing_cost = 0;
+  vipersql::SemanticPlanEvaluation semantic_evaluation;
+  const bool is_complete_plan = idx + 1 == join->tables;
+
+  if (is_complete_plan && join->semantic_plan_refiner != nullptr &&
+      !join->semantic_plan_refiner->empty()) {
+    semantic_evaluation = join->semantic_plan_refiner->EvaluateCandidate(
+        *join, join->positions, idx + 1);
+    if (!semantic_evaluation.feasible) return false;
+    cost = semantic_evaluation.total_cost;
+    candidate_rowcount = semantic_evaluation.output_rows;
+  }
   /*
     We may have to make a temp table, note that this is only a
     heuristic since we cannot know for sure at this point.
@@ -2503,7 +2554,7 @@ bool Optimize_table_order::consider_plan(uint idx,
   if (join->sort_by_table &&
       join->sort_by_table !=
           join->positions[join->const_tables].table->table()) {
-    sort_cost = join->positions[idx].prefix_rowcount;
+    sort_cost = candidate_rowcount;
     cost += sort_cost;
     trace_obj->add("sort_cost", sort_cost).add("new_cost_for_plan", cost);
   }
@@ -2532,6 +2583,147 @@ bool Optimize_table_order::consider_plan(uint idx,
       }
 
   bool cheaper = cost < join->best_read;
+  bool semantic_cost_within_uncertainty = false;
+  bool semantic_buffered_build_tiebreak = false;
+  if (semantic_evaluation.applicable) {
+    best_semantic_refined_cost_seen =
+        std::min(best_semantic_refined_cost_seen, cost);
+  }
+  if (semantic_evaluation.applicable && join->best_read < DBL_MAX) {
+    const double incumbent_refined_cost = join->best_read + 0.001;
+    const bool same_estimated_batch_count =
+        semantic_evaluation.estimated_batch_count ==
+        best_semantic_batch_count;
+    const bool same_semantic_group_inputs =
+        semantic_evaluation.semantic_group_input_tables ==
+        best_semantic_group_input_tables;
+    const bool same_buffered_build_group_count =
+        semantic_evaluation.buffered_build_semantic_groups ==
+        best_semantic_buffered_build_groups;
+    const double uncertainty_band = std::min(
+        1.0,
+        std::max(0.0,
+                 2.0 * vipersql::GetSemanticProfile().profiling_epsilon));
+    const double uncertainty_limit =
+        best_semantic_refined_cost_seen * (1.0 + uncertainty_band);
+    const bool candidate_within_uncertainty = cost <= uncertainty_limit;
+    const bool incumbent_within_uncertainty =
+        incumbent_refined_cost <= uncertainty_limit;
+    semantic_cost_within_uncertainty =
+        candidate_within_uncertainty && incumbent_within_uncertainty;
+    const double refined_tie_epsilon =
+        1.0e-7 *
+        std::max(1.0, std::min(cost, incumbent_refined_cost));
+    if (candidate_within_uncertainty != incumbent_within_uncertainty) {
+      // A candidate outside the best refined-cost band cannot displace one
+      // inside it.
+      cheaper = candidate_within_uncertainty;
+    } else if (semantic_cost_within_uncertainty) {
+      const double profiling_epsilon =
+          vipersql::GetSemanticProfile().profiling_epsilon;
+      const double robustness_tie_band =
+          vipersql::SemanticRobustnessTieBand(profiling_epsilon);
+      const double robustness_tie_limit =
+          robustness_tie_band *
+          std::max(1.0, std::min(cost, incumbent_refined_cost));
+      const bool semantic_tight_refined_cost_tie =
+          vipersql::WithinTightSemanticCostBand(
+              cost, incumbent_refined_cost,
+              best_semantic_refined_cost_seen, profiling_epsilon);
+      const vipersql::SemanticFanoutRiskEvidence candidate_fanout_evidence{
+          semantic_evaluation.semantic_group_estimated_input_rows,
+          semantic_evaluation.semantic_group_estimated_batch_counts,
+          semantic_evaluation.semantic_group_predicate_counts,
+          static_cast<uint64_t>(
+              semantic_evaluation.fanout_risk_root_table),
+          semantic_evaluation.uncertain_fanout_tables,
+          semantic_evaluation.fanout_risk_evidence_valid};
+      const vipersql::SemanticFanoutRiskEvidence incumbent_fanout_evidence{
+          best_semantic_group_input_rows,
+          best_semantic_group_batch_counts,
+          best_semantic_group_predicate_counts,
+          static_cast<uint64_t>(best_semantic_fanout_root_table),
+          best_semantic_uncertain_fanout_tables,
+          best_semantic_fanout_risk_evidence_valid};
+      const vipersql::SemanticFanoutRiskPreference fanout_preference =
+          vipersql::CompareSemanticFanoutRisk(
+              semantic_tight_refined_cost_tie,
+              candidate_fanout_evidence, incumbent_fanout_evidence);
+      if (fanout_preference !=
+          vipersql::SemanticFanoutRiskPreference::kNoPreference) {
+        cheaper = fanout_preference ==
+                  vipersql::SemanticFanoutRiskPreference::kCandidate;
+      } else if (!same_estimated_batch_count) {
+        // Native relational cost is a useful tie-break only when both plans
+        // have the same semantic-pipeline topology. If one plan keeps
+        // independent semantic groups at different relational boundaries and
+        // the other fuses them, native cost cannot represent that difference;
+        // retain the refined semantic-cost comparison in that case.
+        if (same_semantic_group_inputs &&
+            same_buffered_build_group_count) {
+          const double incumbent_native_cost =
+              join->best_positions[idx].prefix_cost;
+          const double native_comparison_epsilon =
+              1.0e-12 * std::max(
+                            1.0, std::min(native_candidate_cost,
+                                          incumbent_native_cost));
+          if (native_candidate_cost + native_comparison_epsilon <
+              incumbent_native_cost) {
+            cheaper = true;
+          } else if (incumbent_native_cost + native_comparison_epsilon <
+                     native_candidate_cost) {
+            cheaper = false;
+          }
+        }
+      } else if (same_semantic_group_inputs) {
+        // When helper work and every semantic group's logical input relation
+        // set are identical, use corrected intermediate exposure only for a
+        // tight refined-cost tie without changing semantic placement or
+        // fusion.
+        if (std::abs(cost - incumbent_refined_cost) <=
+            robustness_tie_limit) {
+          const double candidate_score =
+              semantic_evaluation.intermediate_cardinality_score;
+          const double incumbent_score =
+              best_semantic_intermediate_cardinality_score;
+          const double score_epsilon =
+              1.0e-12 *
+              std::max(1.0, std::min(candidate_score, incumbent_score));
+          if (candidate_score + score_epsilon < incumbent_score) {
+            cheaper = true;
+          } else if (incumbent_score + score_epsilon < candidate_score) {
+            cheaper = false;
+          } else if (std::abs(cost - incumbent_refined_cost) <=
+                     refined_tie_epsilon) {
+            if (semantic_evaluation.buffered_build_semantic_groups !=
+                best_semantic_buffered_build_groups) {
+              // Use blocking only as a last physical-plan tie-break. It must
+              // never outweigh fewer helper batches or smaller corrected
+              // intermediates.
+              cheaper = semantic_evaluation.buffered_build_semantic_groups <
+                        best_semantic_buffered_build_groups;
+              semantic_buffered_build_tiebreak = true;
+            }
+            const double incumbent_native_cost =
+                join->best_positions[idx].prefix_cost;
+            const double native_comparison_epsilon =
+                1.0e-12 *
+                std::max(1.0, std::min(native_candidate_cost,
+                                       incumbent_native_cost));
+            if (!semantic_buffered_build_tiebreak) {
+              if (native_candidate_cost + native_comparison_epsilon <
+                  incumbent_native_cost) {
+                cheaper = true;
+              } else if (incumbent_native_cost + native_comparison_epsilon <
+                         native_candidate_cost) {
+                cheaper = false;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   bool chosen = found_plan_with_allowed_sj ? (plan_uses_allowed_sj && cheaper)
                                            : (plan_uses_allowed_sj || cheaper);
 
@@ -2541,7 +2733,7 @@ bool Optimize_table_order::consider_plan(uint idx,
     to compare the cost. The secondary engine is only consulted when a complete
     join order is considered.
   */
-  if (idx + 1 == join->tables) {  // this is a complete join order
+  if (is_complete_plan) {
     const handlerton *secondary_engine = SecondaryEngineHandlerton(thd);
     if (secondary_engine != nullptr &&
         secondary_engine->compare_secondary_engine_cost != nullptr) {
@@ -2566,9 +2758,35 @@ bool Optimize_table_order::consider_plan(uint idx,
     memcpy((uchar *)join->best_positions, (uchar *)join->positions,
            sizeof(POSITION) * (idx + 1));
 
+    if (semantic_evaluation.applicable)
+      join->semantic_plan_refiner->RememberWinningPlacement(
+          semantic_evaluation);
+    if (semantic_evaluation.applicable)
+      best_semantic_batch_count = semantic_evaluation.estimated_batch_count;
+    if (semantic_evaluation.applicable) {
+      best_semantic_uncertain_fanout_tables =
+          semantic_evaluation.uncertain_fanout_tables;
+      best_semantic_fanout_risk_evidence_valid =
+          semantic_evaluation.fanout_risk_evidence_valid;
+      best_semantic_fanout_root_table =
+          semantic_evaluation.fanout_risk_root_table;
+      best_semantic_buffered_build_groups =
+          semantic_evaluation.buffered_build_semantic_groups;
+      best_semantic_intermediate_cardinality_score =
+          semantic_evaluation.intermediate_cardinality_score;
+      best_semantic_group_input_tables =
+          semantic_evaluation.semantic_group_input_tables;
+      best_semantic_group_input_rows =
+          semantic_evaluation.semantic_group_estimated_input_rows;
+      best_semantic_group_batch_counts =
+          semantic_evaluation.semantic_group_estimated_batch_counts;
+      best_semantic_group_predicate_counts =
+          semantic_evaluation.semantic_group_predicate_counts;
+    }
+
     if (join->m_windows_sort) {
-      windowing_cost = Window::compute_cost(
-          join->positions[idx].prefix_rowcount, join->m_windows);
+      windowing_cost =
+          Window::compute_cost(candidate_rowcount, join->m_windows);
       cost += windowing_cost;
       trace_obj->add("windowing_sort_cost", windowing_cost)
           .add("new_cost_for_plan", cost);
@@ -2582,7 +2800,7 @@ bool Optimize_table_order::consider_plan(uint idx,
     */
     join->best_read = cost - 0.001;
     join->best_rowcount = static_cast<ha_rows>(
-        std::min(join->positions[idx].prefix_rowcount, ULLONG_MAX_DOUBLE));
+        std::min(candidate_rowcount, ULLONG_MAX_DOUBLE));
     join->sort_cost = sort_cost;
     join->windowing_cost = windowing_cost;
     found_plan_with_allowed_sj = plan_uses_allowed_sj;
@@ -2590,8 +2808,8 @@ bool Optimize_table_order::consider_plan(uint idx,
     trace_obj->add_alnum("cause", "plan_uses_disabled_strategy");
 
   DBUG_EXECUTE("opt",
-               print_plan(join, idx + 1, join->positions[idx].prefix_rowcount,
-                          cost, cost, "full_plan"););
+               print_plan(join, idx + 1, candidate_rowcount, cost, cost,
+                          "full_plan"););
 
   return false;
 }
@@ -2821,7 +3039,8 @@ bool Optimize_table_order::best_extension_by_limited_search(
         we continue the search since this partial plan may support other
         semi-join strategies.
       */
-      if (position->prefix_cost >= join->best_read &&
+      if (!join->has_semantic_operators &&
+          position->prefix_cost >= join->best_read &&
           found_plan_with_allowed_sj) {
         DBUG_EXECUTE("opt",
                      print_plan(join, idx + 1, position->prefix_rowcount,
@@ -2836,7 +3055,7 @@ bool Optimize_table_order::best_extension_by_limited_search(
         Prune some less promising partial plans. This heuristic may miss
         the optimal QEPs, thus it results in a non-exhaustive search.
       */
-      if (prune_level == 1) {
+      if (!join->has_semantic_operators && prune_level == 1) {
         if (best_rowcount > position->prefix_rowcount ||
             best_cost > position->prefix_cost ||
             (idx == join->const_tables &&  // 's' is the first table in the QEP
@@ -2873,7 +3092,8 @@ bool Optimize_table_order::best_extension_by_limited_search(
             2) and, There are tables joined by (EQ_)REF key.
             3) and, There is a 1::1 relation between those tables
         */
-        if (prune_level == 1 &&             // 1)
+        if (!join->has_semantic_operators &&
+            prune_level == 1 &&             // 1)
             position->key != nullptr &&     // 2)
             position->rows_fetched <= 1.0)  // 3)
         {
@@ -3172,7 +3392,8 @@ table_map Optimize_table_order::eq_ref_extension_by_limited_search(
           position->no_semijoin();
 
         // Expand only partial plans with lower cost than the best QEP so far
-        if (position->prefix_cost >= join->best_read) {
+        if (!join->has_semantic_operators &&
+            position->prefix_cost >= join->best_read) {
           DBUG_EXECUTE("opt",
                        print_plan(join, idx + 1, position->prefix_rowcount,
                                   position->read_cost, position->prefix_cost,

@@ -17,39 +17,45 @@
 */
 
 #include "sql/iterators/sem_join_iterator.h"
-#include "sql/sql_tmp_table.h"
-#include "sql/opt_trace.h"
-#include "sql/opt_trace_context.h"
-#include "sql/pfs_batch_mode.h"
-#include "sql/iterators/timing_iterator.h"
-#include "sql/sql_optimizer.h"
-#include "scope_guard.h"
 
-static std::string HexDump(const void* data, size_t size) {
-    const unsigned char* p = static_cast<const unsigned char*>(data);
-    std::ostringstream oss;
-    for (size_t i = 0; i < size; ++i) {
-        oss << std::hex << std::setw(2) << std::setfill('0') << (int)p[i] << " ";
-    }
-    return oss.str();
+#include <limits>
+#include <string>
+#include <utility>
+
+#include "mysqld_error.h"
+#include "sql/iterators/vectorized_iterators.h"
+#include "sql/pfs_batch_mode.h"
+
+namespace {
+
+std::string GetSemanticJoinPrompt(
+    const std::vector<Item_func_sem_join *> &conditions) {
+  if (conditions.size() != 1 || conditions.front() == nullptr) return {};
+  Item_func_sem_join *condition = conditions.front();
+  if (condition->argument_count() != 3 ||
+      condition->arguments()[0] == nullptr ||
+      !condition->arguments()[0]->const_for_execution()) {
+    return {};
+  }
+  return condition->prompt();
 }
 
+void ReportSemanticJoinError(THD *thd, const char *operation) {
+  if (thd != nullptr && !thd->is_error()) {
+    my_error(ER_INTERNAL_ERROR, MYF(0), operation);
+  }
+}
+
+}  // namespace
+
 SemJoinIterator::SemJoinIterator(
-    THD* thd,
-    unique_ptr_destroy_only<RowIterator> build_input,
-    const Prealloced_array<TABLE*, 4>& build_input_tables,
-    double estimated_build_rows,
+    THD *thd, unique_ptr_destroy_only<RowIterator> build_input,
+    const Prealloced_array<TABLE *, 4> &build_input_tables,
     unique_ptr_destroy_only<RowIterator> probe_input,
-    const Prealloced_array<TABLE*, 4>& probe_input_tables,
-    bool store_rowids,
-    table_map tables_to_get_rowid_for,
-    size_t max_memory_available,
-    const std::vector<Item_func_sem_join*>& sem_conditions,
-    bool allow_spill_to_disk,
-    JoinType join_type,
-    bool probe_input_batch_mode,
-    uint64_t* hash_table_generation,
-    AccessPath::Type impl_type)
+    const Prealloced_array<TABLE *, 4> &probe_input_tables, bool store_rowids,
+    table_map tables_to_get_rowid_for, size_t max_memory_available,
+    const std::vector<Item_func_sem_join *> &sem_conditions,
+    bool probe_input_batch_mode, AccessPath::Type impl_type)
     : RowIterator(thd),
       m_build_input(std::move(build_input)),
       m_probe_input(std::move(probe_input)),
@@ -60,130 +66,101 @@ SemJoinIterator::SemJoinIterator(
                            tables_to_get_rowid_for,
                            /*tables_to_store_contents_of_null_rows_for=*/0),
       m_tables_to_get_rowid_for(tables_to_get_rowid_for),
-      m_sem_conditions(sem_conditions),
-      m_allow_spill_to_disk(allow_spill_to_disk),
-      m_join_type(join_type),
-      m_estimated_build_rows(estimated_build_rows),
       m_probe_input_batch_mode(probe_input_batch_mode),
-      m_hash_table_generation(hash_table_generation),
-      m_impl_type(impl_type),
-      // Initialize buffer manager with memory and helper name
-      m_buffer_manager(max_memory_available, estimated_build_rows, GetSemImplName(impl_type)),
+      m_semantic_prompt(GetSemanticJoinPrompt(sem_conditions)),
+      m_buffer_manager(max_memory_available, GetSemImplName(impl_type), 1, {},
+                       m_semantic_prompt),
       m_current_loaded_probe_idx(std::numeric_limits<size_t>::max()),
-      m_queue_front_global_idx(0)
-{
+      m_queue_front_global_idx(0) {
   assert(m_build_input != nullptr);
   assert(m_probe_input != nullptr);
-  // Extract prompt from the first condition (if exists) and set it
-  if (!m_sem_conditions.empty()) {
-      std::string p = m_sem_conditions[0]->prompt();
-      log_to_file("SemJoinIterator: Prompt set to: " + p);
-  }
-  if (!m_sem_conditions.empty()) {
-    Item_func_sem_join* sem_func = m_sem_conditions[0];
-
-    // 1. Find which argument belongs to the Build Tables
-    m_build_item = resolve_item_for_tables(sem_func, m_build_input_tables);
-    
-    // 2. Find which argument belongs to the Probe Tables
-    m_probe_item = resolve_item_for_tables(sem_func, m_probe_input_tables);
-
-    // Fallback/Safety: If resolution failed (e.g. complex expression), 
-    // try to deduce: if we found Build, the other is Probe.
-    if (m_build_item && !m_probe_item) {
-          m_probe_item = (m_build_item == sem_func->arguments()[1]) 
-                        ? sem_func->arguments()[2] 
-                        : sem_func->arguments()[1];
-    } else if (!m_build_item && m_probe_item) {
-          m_build_item = (m_probe_item == sem_func->arguments()[1]) 
-                        ? sem_func->arguments()[2] 
-                        : sem_func->arguments()[1];
-    }
-
-    if (!m_build_item || !m_probe_item) {
-        log_to_file("SemJoinIterator Error: Could not map arguments to Build/Probe tables!");
-    }
-  }
-}
-
-Item* SemJoinIterator::resolve_item_for_tables(Item_func_sem_join* sem_func, const pack_rows::TableCollection& tables) {
-    // We only care about args[1] and args[2]. Arg[0] is the prompt.
-    Item* candidates[] = { sem_func->arguments()[1], sem_func->arguments()[2] };
-
-    for (Item* item : candidates) {
-      // Extract the underlying item, bypassing any Item_ref wrappers
-      Item* real_item = item->real_item();
-      
-      if (real_item->type() == Item::FIELD_ITEM) {
-          Item_field* field_item = static_cast<Item_field*>(real_item);
-          for (size_t i = 0; i < tables.tables().size(); ++i) {
-            if (tables.tables()[i].table == field_item->field->table) {
-              return item; // Return the original item so val_str() evaluates correctly
-            }
-          }
+  if (sem_conditions.size() == 1 && sem_conditions.front() != nullptr &&
+      sem_conditions.front()->argument_count() == 3 &&
+      !m_semantic_prompt.empty()) {
+    Item_func_sem_join *sem_func = sem_conditions.front();
+    Item *left = sem_func->arguments()[1];
+    Item *right = sem_func->arguments()[2];
+    const table_map build_tables = m_build_input_tables.tables_bitmap();
+    const table_map probe_tables = m_probe_input_tables.tables_bitmap();
+    const auto belongs_to = [](Item *item, table_map tables) {
+      if (item == nullptr || tables == 0) return false;
+      const table_map used_tables = item->used_tables();
+      return (used_tables & tables) != 0 && (used_tables & ~tables) == 0;
+    };
+    if ((build_tables & probe_tables) == 0) {
+      if (belongs_to(left, build_tables) && belongs_to(right, probe_tables)) {
+        m_build_item = left;
+        m_probe_item = right;
+      } else if (belongs_to(right, build_tables) &&
+                 belongs_to(left, probe_tables)) {
+        m_build_item = right;
+        m_probe_item = left;
       }
     }
-    return nullptr;
+    m_valid_semantic_condition =
+        m_build_item != nullptr && m_probe_item != nullptr;
+  }
 }
 
 SemJoinIterator::~SemJoinIterator() {
-  log_to_file("SemJoinIterator::~SemJoinIterator");
-
   (void)m_buffer_manager.FlushControl("RESET");
 }
 
-bool SemJoinIterator::extract_join_key_for_row(bool is_probe_phase) {
-  // 1. Safety Checks
-  if (m_sem_conditions.empty()) {
-      log_to_file("extract_join_key_for_row: Error - m_sem_conditions is empty!");
-      return false;
+SemJoinIterator::KeyExtractionResult SemJoinIterator::extract_join_key_for_row(
+    bool is_probe_phase) {
+  Item *item_to_read = is_probe_phase ? m_probe_item : m_build_item;
+  if (item_to_read == nullptr) return KeyExtractionResult::kError;
+
+  m_buffer.length(0);
+  String *value = item_to_read->val_str(&m_buffer);
+  if (thd()->is_error()) return KeyExtractionResult::kError;
+  if (item_to_read->null_value) return KeyExtractionResult::kNull;
+  if (value == nullptr) return KeyExtractionResult::kError;
+
+  // Keep the key valid after the Item's backing record changes.
+  if (value != &m_buffer && m_buffer.copy(*value)) {
+    if (!thd()->is_error()) {
+      my_error(ER_OUTOFMEMORY, MYF(0), value->length());
+    }
+    return KeyExtractionResult::kError;
   }
-
-  Item_func_sem_join* sem_func = m_sem_conditions[0];
-  Item* item_to_read = is_probe_phase ? m_probe_item : m_build_item;
-
-  if (item_to_read == nullptr) return false;
-
-  // 2. OPTIMIZED EXTRACT: Pass m_buffer as the scratch space
-  //    MySQL will write here if it needs temp storage.
-  String* s = item_to_read->val_str(&m_buffer);
-  
-  if (!s || item_to_read->null_value) {
-      return false; // NULL handling
+  if (m_buffer.length() != 0 && m_buffer.ptr() == nullptr) {
+    return KeyExtractionResult::kError;
   }
-
-  // 3. NORMALIZE: Ensure the data is actually in m_buffer
-  if (s != &m_buffer) {
-      // The Item returned a pointer to internal memory (e.g. Record Buffer).
-      // We must copy it into m_buffer so we own the data.
-      if (m_buffer.copy(*s)) {
-          return false; // OOM error
-      }
-  }
-  return true;
+  return KeyExtractionResult::kOk;
 }
 
 bool SemJoinIterator::Init() {
-  log_to_file("SemJoinIterator::Init");
-  if (m_buffer_manager.FlushControl("RESET")) return true;
-  if (m_buffer_manager.Reset()) return true;
-  build_rows_buffer.clear();
+  if (!m_valid_semantic_condition || thd()->is_error()) {
+    ReportSemanticJoinError(thd(), "invalid semantic join condition");
+    return true;
+  }
+  if (m_buffer_manager.FlushControl("RESET")) {
+    ReportSemanticJoinError(thd(), "semantic join reset failed");
+    return true;
+  }
+  if (m_buffer_manager.Reset()) {
+    ReportSemanticJoinError(thd(), "semantic join buffer reset failed");
+    return true;
+  }
+  m_build_rows.clear();
   while (!m_probe_rows_queue.empty()) m_probe_rows_queue.pop();
   m_active_probe_row.clear();
   m_current_loaded_probe_idx = std::numeric_limits<size_t>::max();
   m_queue_front_global_idx = 0;
   m_probe_input_exhausted = false;
   m_probe_batch_flushed = false;
+  m_probe_frontier_overwritten = false;
 
-  // 1. Initialize build and probe input iterators
   PrepareForRequestRowId(m_build_input_tables.tables(),
                          m_tables_to_get_rowid_for);
   if (m_build_input->Init()) {
+    ReportSemanticJoinError(thd(),
+                            "semantic join build input initialization failed");
     return true;
   }
   m_probe_input->EndPSIBatchModeIfStarted();
 
-  int idx = 0;
   m_buffer_manager.SetStatus("BUILD");
   m_row_size = ComputeRowSizeUpperBound(m_build_input_tables);
   m_build_input->SetNullRowFlag(/*is_null_row=*/false);
@@ -191,6 +168,7 @@ bool SemJoinIterator::Init() {
   while (true) {
     int ret = m_build_input->Read();
     if (ret == 1) {  // error
+      ReportSemanticJoinError(thd(), "semantic join build input read failed");
       return true;
     }
     thd()->check_yield();
@@ -200,48 +178,55 @@ bool SemJoinIterator::Init() {
     assert(ret == 0);
     RequestRowId(m_build_input_tables.tables(), m_tables_to_get_rowid_for);
 
-    // Extract join key from build row
-    if (!extract_join_key_for_row(false)) {
-      // Skip this row since join key contains NULL
-      continue;
+    const KeyExtractionResult key_result = extract_join_key_for_row(false);
+    if (key_result == KeyExtractionResult::kError) {
+      ReportSemanticJoinError(thd(),
+                              "semantic join build key extraction failed");
+      return true;
     }
+    if (key_result == KeyExtractionResult::kNull) continue;
 
     auto row_buf = store_row_to_buffer(m_build_input_tables, m_row_size);
     if (row_buf.empty()) {
-      // Handle error: failed to store row buffer
-      log_to_file("Init (Build): store_row_to_buffer returned EMPTY!");
+      ReportSemanticJoinError(thd(),
+                              "semantic join build row buffering failed");
       return true;
     }
 
-    // Now caller pushes row_buf into the appropriate buffer vector
-    build_rows_buffer.push_back(std::move(row_buf));
+    const size_t row_index = m_build_rows.size();
+    m_build_rows.push_back(std::move(row_buf));
 
-    // Create key-index pair
-    std::string key_copy(m_buffer.ptr(), m_buffer.length());
-    KeyIndexPair pair{key_copy, static_cast<uint32_t>(idx)};
-    if (m_buffer_manager.PushTuple(pair)) {
-      return true;  // error pushing or kernel launch
+    std::string key_copy;
+    if (m_buffer.length() != 0) {
+      key_copy.assign(m_buffer.ptr(), m_buffer.length());
     }
-
-    idx += 1;
+    semhelpers::KeyIndexPair pair{std::move(key_copy), row_index};
+    if (m_buffer_manager.PushTuple(pair)) {
+      ReportSemanticJoinError(thd(), "semantic join build submission failed");
+      return true;
+    }
   }
 
-  // 4. Flush remaining batched build keys to python server
   if (m_buffer_manager.FlushBatch()) {
-    return true;  // error flushing last batch
+    ReportSemanticJoinError(thd(), "semantic join build flush failed");
+    return true;
   }
 
   if (m_buffer_manager.FlushControl("BUILD_DONE")) {
-    return true; 
+    ReportSemanticJoinError(thd(), "semantic join build completion failed");
+    return true;
   }
 
-  // 5. Switch to probe phase.
-  m_buffer_manager.PopResult(); // sync build stream
-  if (m_buffer_manager.HasError()) return true;
+  if (m_buffer_manager.HasError()) {
+    ReportSemanticJoinError(thd(), "semantic join build helper failed");
+    return true;
+  }
   m_buffer_manager.SetStatus("PROBE");
-  probe_idx = 0;
+  m_probe_row_index = 0;
 
   if (m_probe_input->Init()) {
+    ReportSemanticJoinError(thd(),
+                            "semantic join probe input initialization failed");
     return true;
   }
   PrepareForRequestRowId(m_probe_input_tables.tables(),
@@ -264,8 +249,19 @@ int SemJoinIterator::Read() {
     // Fill-first scheduling: form the next probe batch before waiting for a
     // helper result. Queued output is still exposed one tuple at a time.
     if (!m_probe_input_exhausted) {
+      if (m_probe_frontier_overwritten) {
+        if (m_probe_rows_queue.empty()) {
+          ReportSemanticJoinError(thd(),
+                                  "semantic join probe frontier is invalid");
+          return 1;
+        }
+        LoadIntoTableBuffers(m_probe_input_tables,
+                             m_probe_rows_queue.back().data());
+        m_probe_frontier_overwritten = false;
+      }
       const int ret = m_probe_input->Read();
       if (ret == 1) {
+        ReportSemanticJoinError(thd(), "semantic join probe input read failed");
         return 1;  // error
       }
       thd()->check_yield();
@@ -275,34 +271,44 @@ int SemJoinIterator::Read() {
       } else {
         assert(ret == 0);
         RequestRowId(m_probe_input_tables.tables(), m_tables_to_get_rowid_for);
-        if (!extract_join_key_for_row(true)) {
-          // Skip probe row with NULL join key, continue loop
-          continue;
+        const KeyExtractionResult key_result = extract_join_key_for_row(true);
+        if (key_result == KeyExtractionResult::kError) {
+          ReportSemanticJoinError(thd(),
+                                  "semantic join probe key extraction failed");
+          return 1;
         }
+        if (key_result == KeyExtractionResult::kNull) continue;
 
-        auto probe_row_buf = store_row_to_buffer(m_probe_input_tables, m_row_size);
+        auto probe_row_buf =
+            store_row_to_buffer(m_probe_input_tables, m_row_size);
         if (probe_row_buf.empty()) {
-          return 1;  // error
+          ReportSemanticJoinError(thd(),
+                                  "semantic join probe row buffering failed");
+          return 1;
         }
 
         m_probe_rows_queue.push(std::move(probe_row_buf));
 
-        std::string key_copy(m_buffer.ptr(), m_buffer.length());
-        KeyIndexPair pair{key_copy, probe_idx};
-        probe_idx += 1;
+        std::string key_copy;
+        if (m_buffer.length() != 0) {
+          key_copy.assign(m_buffer.ptr(), m_buffer.length());
+        }
+        semhelpers::KeyIndexPair pair{std::move(key_copy), m_probe_row_index};
+        ++m_probe_row_index;
         bool did_submit = false;
         if (m_buffer_manager.PushTuple(pair, &did_submit)) {
-          return 1;  // error pushing or launching kernel
+          ReportSemanticJoinError(thd(),
+                                  "semantic join probe submission failed");
+          return 1;
         }
-        if (did_submit) {
-          submitted_before_pop = true;
-        }
+        if (did_submit) submitted_before_pop = true;
       }
     }
 
     if (m_probe_input_exhausted && !m_probe_batch_flushed) {
-      // Flush exactly once; EOF submits a residual even below B_min.
+      // Flush exactly once; EOF submits a residual below the minimum size.
       if (m_buffer_manager.FlushBatch()) {
+        ReportSemanticJoinError(thd(), "semantic join probe flush failed");
         return 1;  // error flushing last batch
       }
       m_probe_batch_flushed = true;
@@ -320,9 +326,6 @@ int SemJoinIterator::Read() {
       continue;
     }
 
-    // -------------------------------------------------------
-    // Processing Results
-    // -------------------------------------------------------
     std::unique_ptr<std::pair<size_t, size_t>> result_pair_ptr;
     if (m_buffer_manager.HasReadyResult()) {
       result_pair_ptr = m_buffer_manager.PopResult();
@@ -335,7 +338,10 @@ int SemJoinIterator::Read() {
     }
 
     if (!result_pair_ptr) {
-      if (m_buffer_manager.HasError()) return 1;
+      if (m_buffer_manager.HasError()) {
+        ReportSemanticJoinError(thd(), "semantic join result fetch failed");
+        return 1;
+      }
       if (m_probe_input_exhausted && !m_buffer_manager.HasPendingWork()) {
         while (!m_probe_rows_queue.empty()) m_probe_rows_queue.pop();
         return -1;
@@ -343,49 +349,41 @@ int SemJoinIterator::Read() {
       continue;
     }
 
-    size_t returned_probe_idx = result_pair_ptr->first;
-    size_t matched_build_idx  = result_pair_ptr->second;
+    const size_t returned_probe_idx = result_pair_ptr->first;
+    const size_t matched_build_idx = result_pair_ptr->second;
 
-    // 1. Load Build Row (Must always be loaded as it likely changes)
-    if (matched_build_idx >= build_rows_buffer.size()) {
-        std::string err_msg = "Error: Returned build index out of bounds!";
-        log_to_file(err_msg);
-        return 1;
+    if (matched_build_idx >= m_build_rows.size()) {
+      ReportSemanticJoinError(thd(),
+                              "semantic join returned an invalid build row");
+      return 1;
     }
-    LoadIntoTableBuffers(m_build_input_tables, build_rows_buffer[matched_build_idx].data());
+    LoadIntoTableBuffers(m_build_input_tables,
+                         m_build_rows[matched_build_idx].data());
 
-    // 2. Load Probe Row
     if (returned_probe_idx == m_current_loaded_probe_idx) {
-        // The child is advanced before output consumption, so restore the
-        // active snapshot even for another match on the same probe tuple.
-        LoadIntoTableBuffers(m_probe_input_tables, m_active_probe_row.data());
+      // The helper can return multiple build matches for one probe row.
+      LoadIntoTableBuffers(m_probe_input_tables, m_active_probe_row.data());
     } else {
-        // MISS: Need to load new row.
-        
-        while (!m_probe_rows_queue.empty() && m_queue_front_global_idx < returned_probe_idx) {
-            m_probe_rows_queue.pop();
-            m_queue_front_global_idx++;
-        }
-
-        if (m_probe_rows_queue.empty() || m_queue_front_global_idx != returned_probe_idx) {
-             // ... error handling ...
-             return 1;
-        }
-
-        // FIX: Move into the CLASS MEMBER, not a local variable.
-        // This destroys the previous active row (which is fine, we are done with it)
-        // and persists the new one.
-        m_active_probe_row = std::move(m_probe_rows_queue.front());
+      while (!m_probe_rows_queue.empty() &&
+             m_queue_front_global_idx < returned_probe_idx) {
         m_probe_rows_queue.pop();
-        
-        // Load from the member variable
-        LoadIntoTableBuffers(m_probe_input_tables, m_active_probe_row.data());
-        
-        m_current_loaded_probe_idx = returned_probe_idx;
-        
-        // m_queue_front_global_idx must be incremented because we popped one item
-        m_queue_front_global_idx++;
+        ++m_queue_front_global_idx;
+      }
+      if (m_probe_rows_queue.empty() ||
+          m_queue_front_global_idx != returned_probe_idx) {
+        ReportSemanticJoinError(thd(),
+                                "semantic join returned an invalid probe row");
+        return 1;
+      }
+
+      m_active_probe_row = std::move(m_probe_rows_queue.front());
+      m_probe_rows_queue.pop();
+      LoadIntoTableBuffers(m_probe_input_tables, m_active_probe_row.data());
+      m_current_loaded_probe_idx = returned_probe_idx;
+      ++m_queue_front_global_idx;
     }
+    m_probe_frontier_overwritten =
+        !m_probe_input_exhausted && returned_probe_idx + 1 < m_probe_row_index;
     return 0;
   }
 }

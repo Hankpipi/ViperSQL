@@ -1,272 +1,278 @@
 #include "sql/iterators/helpers/sem_join_helper.h"
 
 #include <algorithm>
-#include <utility>
-#include <vector>
+#include <cstdint>
 #include <future>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <random>
 #include <sstream>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "zmq_rpc_api.h"
-#include "sql_string.h"
 
 namespace semhelpers {
+namespace {
 
-// Ensure this matches the definition in your Iterator/BufferManager
 using ResultPair = std::pair<size_t, size_t>;
 
-static std::string GenRandomJoinId() {
+std::string GenRandomJoinId() {
   static thread_local std::mt19937_64 rng{std::random_device{}()};
-  std::uniform_int_distribution<uint64_t> dist;
+  std::uniform_int_distribution<uint64_t> distribution;
 
-  uint64_t a = dist(rng);
-  uint64_t b = dist(rng);
+  const uint64_t first = distribution(rng);
+  const uint64_t second = distribution(rng);
 
-  std::ostringstream oss;
-  oss << std::hex << a << b;
-  return oss.str();
+  std::ostringstream stream;
+  stream << std::hex << first << second;
+  return stream.str();
 }
 
-SemJoinHelper::SemJoinHelper(std::string model_name)
+bool ResponseSucceeded(const nlohmann::json &response) {
+  return response.is_object() && response.contains("ok") &&
+         response["ok"].is_boolean() && response["ok"].get<bool>();
+}
+
+bool ParseIndex(const nlohmann::json &value, size_t *index) {
+  uint64_t parsed = 0;
+  if (value.is_number_unsigned()) {
+    parsed = value.get<uint64_t>();
+  } else if (value.is_number_integer()) {
+    const int64_t signed_value = value.get<int64_t>();
+    if (signed_value < 0) return false;
+    parsed = static_cast<uint64_t>(signed_value);
+  } else {
+    return false;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) return false;
+  *index = static_cast<size_t>(parsed);
+  return true;
+}
+
+}  // namespace
+
+SemJoinHelper::SemJoinHelper(std::string model_name, std::string predicate)
     : m_model_name(std::move(model_name)),
-      m_join_id(GenRandomJoinId()) {
-  m_capacity = 0;
-  m_expected_count = 0;
-}
+      m_predicate(std::move(predicate)),
+      m_join_id(GenRandomJoinId()) {}
 
-SemJoinHelper::~SemJoinHelper() {
-  Destroy();
-}
+SemJoinHelper::~SemJoinHelper() { Destroy(); }
 
-bool SemJoinHelper::Init(size_t capacity) {
-  m_capacity = capacity;
-  m_expected_count = 0;
-  m_raw_response.clear();
-  m_results.clear(); // This is now vector<pair<size_t, size_t>>
+bool SemJoinHelper::Init() {
+  if (m_future.valid()) m_future.wait();
+  m_results.clear();
+  m_failed = false;
   m_status.clear();
   return false;
 }
 
-bool SemJoinHelper::SubmitBatch(const void* host_data, size_t n_rows) {
-  if (m_status == "BUILD") {
-    return SubmitBuildBatch(host_data, n_rows);
-  } else if (m_status == "BUILD_DONE") {
-    return SubmitBuildDone();
-  } else if (m_status == "PROBE") {
-    return SubmitProbeBatch(host_data, n_rows);
-  } else if (m_status == "RESET") {
-    return SubmitReset();
-  } else {
-    log_to_file("SemJoinHelper::SubmitBatch unknown status: " + m_status);
-    return true;
-  }
+bool SemJoinHelper::SubmitBatch(const void *host_data, size_t n_rows) {
+  m_results.clear();
+  m_failed = false;
+
+  if (m_status == "BUILD") return SubmitBuildBatch(host_data, n_rows);
+  if (m_status == "BUILD_DONE") return SubmitBuildDone();
+  if (m_status == "PROBE") return SubmitProbeBatch(host_data, n_rows);
+  if (m_status == "RESET") return SubmitReset();
+
+  m_failed = true;
+  return true;
 }
 
-bool SemJoinHelper::SubmitBuildBatch(const void* host_data, size_t n_rows) {
-  const KeyIndexPair* pairs = static_cast<const KeyIndexPair*>(host_data);
-  std::vector<KeyIndexPair> values(pairs, pairs + n_rows);
+bool SemJoinHelper::SubmitBuildBatch(const void *host_data, size_t n_rows) {
+  if (n_rows != 0 && host_data == nullptr) {
+    m_failed = true;
+    return true;
+  }
+
+  std::vector<KeyIndexPair> values;
+  if (n_rows != 0) {
+    const auto *pairs = static_cast<const KeyIndexPair *>(host_data);
+    values.assign(pairs, pairs + n_rows);
+  }
 
   const std::string name = m_model_name;
-  const std::string predicate = m_predicate; 
-  const std::string type = "build";
+  const std::string predicate = m_predicate;
   const std::string join_id = m_join_id;
-
-  // Build phase acts as an upload barrier. No results returned immediately.
-  m_expected_count = 0;
-  
-  m_future = std::async(std::launch::async, [this, name, values = std::move(values), predicate, type, join_id]() {
-    try {
-      nlohmann::json resp = semantic_join_zmq_rpc_call(name, values, predicate, type, join_id);
-      m_raw_response = resp.dump();
-    } catch (const std::exception& e) {
-      m_raw_response = "{}";
-      log_to_file("SemJoinHelper::SubmitBuildBatch Exception: " + std::string(e.what()));
-    } catch (...) {
-      m_raw_response = "{}";
-    }
-  });
-
+  try {
+    m_future = std::async(
+        std::launch::async,
+        [this, name, predicate, values = std::move(values), join_id]() {
+          try {
+            const nlohmann::json response = semantic_join_zmq_rpc_call(
+                name, values, predicate, "build", join_id);
+            if (!ResponseSucceeded(response)) m_failed = true;
+          } catch (...) {
+            m_failed = true;
+          }
+        });
+  } catch (...) {
+    m_failed = true;
+    return true;
+  }
   return false;
 }
 
-bool SemJoinHelper::SubmitProbeBatch(const void* host_data, size_t n_rows) {
-  const KeyIndexPair* pairs = static_cast<const KeyIndexPair*>(host_data);
-  std::vector<KeyIndexPair> values(pairs, pairs + n_rows);
+bool SemJoinHelper::SubmitProbeBatch(const void *host_data, size_t n_rows) {
+  if (n_rows != 0 && host_data == nullptr) {
+    m_failed = true;
+    return true;
+  }
+
+  std::vector<KeyIndexPair> values;
+  if (n_rows != 0) {
+    const auto *pairs = static_cast<const KeyIndexPair *>(host_data);
+    values.assign(pairs, pairs + n_rows);
+  }
 
   const std::string name = m_model_name;
-  const std::string predicate = m_predicate; 
-  const std::string type = "probe";
+  const std::string predicate = m_predicate;
   const std::string join_id = m_join_id;
+  try {
+    m_future = std::async(
+        std::launch::async,
+        [this, name, predicate, values = std::move(values), join_id]() {
+          try {
+            const nlohmann::json response = semantic_join_zmq_rpc_call(
+                name, values, predicate, "probe", join_id);
+            if (!ResponseSucceeded(response) || !response.contains("values") ||
+                !response["values"].is_array()) {
+              m_failed = true;
+              return;
+            }
 
-  // In Probe phase, we expect results corresponding to these rows
-  m_expected_count = n_rows;
+            std::unordered_set<size_t> submitted_probe_indices;
+            submitted_probe_indices.reserve(values.size());
+            for (const KeyIndexPair &value : values) {
+              submitted_probe_indices.insert(value.index);
+            }
 
-  m_future = std::async(std::launch::async, [this, name, values = std::move(values), predicate, type, join_id]() {
-    nlohmann::json resp;
-    try {
-      resp = semantic_join_zmq_rpc_call(name, values, predicate, type, join_id);
-      // Optional: Store raw response for debug
-      // m_raw_response = resp.dump(); 
-    } catch (const std::exception& e) {
-        log_to_file("SemJoinHelper::SubmitProbeBatch RPC Exception: " + std::string(e.what()));
-        return;
-    } catch (...) {
-        return;
-    }
+            std::vector<ResultPair> results;
+            results.reserve(response["values"].size());
+            for (const auto &entry : response["values"]) {
+              if (!entry.is_array() || entry.size() != 2) {
+                m_failed = true;
+                return;
+              }
 
-    // Temporary vector to hold flattened results
-    std::vector<ResultPair> temp_results;
+              size_t build_index;
+              size_t probe_index;
+              if (!ParseIndex(entry[0], &build_index) ||
+                  !ParseIndex(entry[1], &probe_index) ||
+                  submitted_probe_indices.find(probe_index) ==
+                      submitted_probe_indices.end()) {
+                m_failed = true;
+                return;
+              }
+              results.emplace_back(probe_index, build_index);
+            }
 
-    if (resp.is_object() && resp.contains("values") && resp["values"].is_array()) {
-      const auto& arr = resp["values"];
-    
-      for (const auto& e : arr) {
-        if (!e.is_array() || e.size() < 2) continue;
-      
-        size_t pid = 0, bid = 0;
-        try {
-          bid = e.at(0).get<size_t>();
-          pid = e.at(1).get<size_t>();
-        } catch (...) {
-          continue;
-        }
-      
-        temp_results.emplace_back(pid, bid);
-      }
-    }
-
-    // CRITICAL: Sort results by Probe Index (first) then Build Index (second).
-    std::sort(temp_results.begin(), temp_results.end());
-
-    // Swap into the member variable for FetchResults to pick up
-    // Note: We use a mutex if FetchResults can be called concurrently, 
-    // but BufferManager usually waits for Synchronize() first.
-    m_results.swap(temp_results);
-
-  });
-
+            std::sort(results.begin(), results.end());
+            if (std::adjacent_find(results.begin(), results.end()) !=
+                results.end()) {
+              m_failed = true;
+              return;
+            }
+            m_results.swap(results);
+          } catch (...) {
+            m_failed = true;
+          }
+        });
+  } catch (...) {
+    m_failed = true;
+    return true;
+  }
   return false;
 }
 
 bool SemJoinHelper::SubmitBuildDone() {
   const std::string name = m_model_name;
   const std::string predicate = m_predicate;
-  const std::string type = "build_done";
   const std::string join_id = m_join_id;
-
-  m_expected_count = 0;
-
-  m_future = std::async(std::launch::async, [this, name, predicate, type, join_id]() {
-    try {
-      std::vector<KeyIndexPair> empty;
-      nlohmann::json resp = semantic_join_zmq_rpc_call(name, empty, predicate, type, join_id);
-      m_raw_response = resp.dump();
-    } catch (const std::exception& e) {
-      m_raw_response = "{}";
-      log_to_file("SemJoinHelper::SubmitBuildDone Exception: " + std::string(e.what()));
-    } catch (...) {
-      m_raw_response = "{}";
-    }
-  });
-
+  try {
+    m_future =
+        std::async(std::launch::async, [this, name, predicate, join_id]() {
+          try {
+            const std::vector<KeyIndexPair> empty;
+            const nlohmann::json response = semantic_join_zmq_rpc_call(
+                name, empty, predicate, "build_done", join_id);
+            if (!ResponseSucceeded(response)) m_failed = true;
+          } catch (...) {
+            m_failed = true;
+          }
+        });
+  } catch (...) {
+    m_failed = true;
+    return true;
+  }
   return false;
 }
 
 bool SemJoinHelper::SubmitReset() {
   const std::string name = m_model_name;
   const std::string predicate = m_predicate;
-  const std::string type = "reset";
   const std::string join_id = m_join_id;
-
-  m_expected_count = 0;
-
-  m_future = std::async(std::launch::async, [this, name, predicate, type, join_id]() {
-    try {
-      std::vector<KeyIndexPair> empty;
-      nlohmann::json resp = semantic_join_zmq_rpc_call(name, empty, predicate, type, join_id);
-      m_raw_response = resp.dump();
-    } catch (const std::exception& e) {
-      m_raw_response = "{}";
-      log_to_file("SemJoinHelper::SubmitReset Exception: " + std::string(e.what()));
-    } catch (...) {
-      m_raw_response = "{}";
-    }
-  });
-
+  try {
+    m_future =
+        std::async(std::launch::async, [this, name, predicate, join_id]() {
+          try {
+            const std::vector<KeyIndexPair> empty;
+            const nlohmann::json response = semantic_join_zmq_rpc_call(
+                name, empty, predicate, "reset", join_id);
+            if (!ResponseSucceeded(response)) m_failed = true;
+          } catch (...) {
+            m_failed = true;
+          }
+        });
+  } catch (...) {
+    m_failed = true;
+    return true;
+  }
   return false;
 }
 
-bool SemJoinHelper::FetchResults(void* out_buffer, size_t* out_result_count) {
-  if (!out_buffer || !out_result_count) return true;
+bool SemJoinHelper::FetchResults(void *out_buffer, size_t *out_result_count) {
+  if (out_result_count == nullptr) {
+    m_failed = true;
+    return true;
+  }
+  *out_result_count = 0;
 
-  // Ensure async task is done
-  if (m_future.valid()) m_future.wait();
-
+  if (Synchronize()) return true;
   if (m_status == "BUILD" || m_status == "BUILD_DONE" || m_status == "RESET") {
-    // Build phase returns nothing
-    *out_result_count = 0;
     return false;
   }
-
-  // PROBE Phase
-  if (m_results.empty()) {
-      *out_result_count = 0;
-      return false;
+  if (m_status != "PROBE") {
+    m_failed = true;
+    return true;
+  }
+  if (m_results.empty()) return false;
+  if (out_buffer == nullptr) {
+    m_failed = true;
+    return true;
   }
 
-  // 1. Cast output buffer to the expected Pair type
-  ResultPair* buffer_ptr = static_cast<ResultPair*>(out_buffer);
-
-  // 2. Copy data (Flat copy)
-  // Since std::vector stores data contiguously, we can technically use memcpy,
-  // but std::copy is safer for types.
-  std::copy(m_results.begin(), m_results.end(), buffer_ptr);
-
+  auto *results = static_cast<ResultPair *>(out_buffer);
+  std::copy(m_results.begin(), m_results.end(), results);
   *out_result_count = m_results.size();
-  
-  // 3. Clear results to avoid re-reading
   m_results.clear();
-
   return false;
 }
 
 bool SemJoinHelper::Synchronize() {
   if (m_future.valid()) m_future.wait();
-  return false;
+  return m_failed;
 }
 
 void SemJoinHelper::Destroy() {
   if (m_future.valid()) m_future.wait();
   m_results.clear();
-  m_raw_response.clear();
-  m_expected_count = 0;
+  m_failed = false;
   m_status.clear();
 }
 
-void SemJoinHelper::SetStatus(const std::string& status) {
-  m_status = status;
-  log_to_file("SemJoinHelper: status=" + status);
-}
+void SemJoinHelper::SetStatus(const std::string &status) { m_status = status; }
 
-void SemJoinHelper::SetPredicate(std::string predicate) {
-  m_predicate = std::move(predicate);
-}
-
-void SemJoinHelper::SetModelName(std::string model_name) {
-  m_model_name = std::move(model_name);
-}
-
-const std::string& SemJoinHelper::GetModelName() {
-  return m_model_name;
-}
-
-void SemJoinHelper::SetJoinId(std::string join_id) { 
-  m_join_id = std::move(join_id); 
-}
-
-const std::string& SemJoinHelper::GetJoinId() const { 
-  return m_join_id; 
-}
-
-} // namespace semhelpers
+}  // namespace semhelpers

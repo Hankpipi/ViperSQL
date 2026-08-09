@@ -837,6 +837,7 @@ MySQL clients support the protocol:
 #include "sql/rpl_shardbeats.h"  // Shardbeats_manager
 #include "sql/rpl_trx_tracking.h"
 #include "sql/sd_notify.h"  // sd_notify_connect
+#include "sql/semantic_profile.h"
 #include "sql/session_tracker.h"
 #include "sql/set_var.h"
 #include "sql/sp_head.h"    // init_sp_psi_keys
@@ -8090,6 +8091,10 @@ static int init_server_components() {
 
   /* Initialize the optimizer cost module */
   init_optimizer_cost_module(true);
+  if (!opt_initialize && !is_help_or_validate_option()) {
+    /* Do not contact the external helper during normal server startup. */
+    (void)vipersql::LoadSemanticProfile(mysql_real_data_home);
+  }
   ft_init_stopwords();
 
   init_max_user_conn();
@@ -9860,6 +9865,9 @@ static void process_bootstrap() {
         LogErr(ERROR_LEVEL, ER_SYSTEM_VIEW_INIT_FAILED);
         unireg_abort(MYSQLD_ABORT_EXIT);
       }
+
+      /* Generate a profile after the data dictionary has been initialized. */
+      (void)vipersql::GenerateSemanticProfile(mysql_real_data_home);
 
       unireg_abort(MYSQLD_SUCCESS_EXIT);
     }

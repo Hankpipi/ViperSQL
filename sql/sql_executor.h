@@ -254,9 +254,6 @@ bool setup_sum_funcs(THD *thd, Item_sum **func_ptr);
 bool make_group_fields(JOIN *main_join, JOIN *curr_join);
 bool check_unique_constraint(TABLE *table);
 ulonglong unique_hash(const Field *field, ulonglong *hash);
-ulonglong compute_group_hash(TABLE *table, 
-                             Temp_table_param *m_temp_table_param,
-                             std::unordered_map<uint64_t, std::string> *hash_to_rawkey);
 int read_const(TABLE *table, Index_lookup *ref);
 
 class QEP_TAB : public QEP_shared_owner {

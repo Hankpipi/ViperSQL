@@ -33,11 +33,11 @@
 #include "sql/sql_executor.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -90,6 +90,8 @@
 #include "sql/opt_trace.h"  // Opt_trace_object
 #include "sql/query_options.h"
 #include "sql/record_buffer.h"  // Record_buffer
+#include "sql/semantic_plan_refiner.h"
+#include "sql/semantic_profile.h"
 #include "sql/sort_param.h"
 #include "sql/sql_array.h"  // Bounds_checked_array
 #include "sql/sql_base.h"   // fill_record
@@ -112,8 +114,7 @@
 #include "template_utils.h"
 #include "thr_lock.h"
 
-#include "sql/item_func_semantic.h"  
-#include "sql/iterators/external_helper_interface.h"
+#include "sql/item_func_semantic.h"
 
 using std::make_pair;
 using std::max;
@@ -752,10 +753,10 @@ Item *CreateConjunction(List<Item> *items) {
   Return a new iterator that wraps "iterator" and that tests all of the given
   conditions (if any), ANDed together. If there are no conditions, just return
   the given iterator back.
-  
-  This version ensures standard conditions and semantic conditions are
-  placed in separate, stacked FilterAccessPaths to guarantee execution order.
- */
+
+  Relational conditions are attached below semantic conditions to preserve
+  predicate order.
+*/
 AccessPath *PossiblyAttachFilter(AccessPath *path,
                                  const vector<Item *> &conditions, THD *thd,
                                  table_map *conditions_depend_on_outer_tables) {
@@ -765,6 +766,10 @@ AccessPath *PossiblyAttachFilter(AccessPath *path,
   // See if any of the sub-conditions are known to be always false,
   // and filter out any conditions that are known to be always true.
   for (Item *cond : conditions) {
+    if (ItemHasSemJoin(cond) && !thd->is_error()) {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "SEM_JOIN outside a direct join predicate");
+    }
     if (cond->const_item()) {
       if (cond->val_int() == 0) {
         if (ContainsAnyMRRPaths(path)) {
@@ -777,7 +782,6 @@ AccessPath *PossiblyAttachFilter(AccessPath *path,
         // Known to be always true, so skip it.
       }
     } else {
-      // Split the conditions based on whether they contain a semantic function
       if (find_semantic_func(cond) != nullptr) {
         semantic_items.push_back(cond);
       } else {
@@ -786,23 +790,22 @@ AccessPath *PossiblyAttachFilter(AccessPath *path,
     }
   }
 
-  // Layer 1: Attach standard, fast conditions directly on top of the input path
   Item *normal_condition = CreateConjunction(&normal_items);
   if (normal_condition != nullptr) {
     *conditions_depend_on_outer_tables |= normal_condition->used_tables();
-    AccessPath *normal_filter_path = NewFilterAccessPath(thd, path, normal_condition);
-    
-    // NOTE: We don't care about filter_effect here, even though we should.
+    AccessPath *normal_filter_path =
+        NewFilterAccessPath(thd, path, normal_condition);
+
     CopyBasicProperties(*path, normal_filter_path);
     path = normal_filter_path;
   }
 
-  // Layer 2: Attach the expensive semantic conditions above the normal conditions
   Item *semantic_condition = CreateConjunction(&semantic_items);
   if (semantic_condition != nullptr) {
     *conditions_depend_on_outer_tables |= semantic_condition->used_tables();
-    AccessPath *semantic_filter_path = NewFilterAccessPath(thd, path, semantic_condition);
-    
+    AccessPath *semantic_filter_path =
+        NewFilterAccessPath(thd, path, semantic_condition);
+
     CopyBasicProperties(*path, semantic_filter_path);
     path = semantic_filter_path;
   }
@@ -1105,22 +1108,19 @@ void SplitConditions(Item *condition, QEP_TAB *current_table,
   Mem_root_array<Item *> condition_parts(*THR_MALLOC);
   ExtractConditions(condition, &condition_parts);
   for (Item *item : condition_parts) {
-    // =================================================================
-    // VIPERSQL: VECTOR-BATCHING PULL-UP
-    // We intercept semantic filters and push them into join_conditions to wrap the 
-    // NestedLoopJoin, preventing 1-by-1 index lookup execution.
-    // =================================================================
+    // Lift semantic filters above a join so the executor can batch them.
     if (find_semantic_func(item) != nullptr) {
       if (current_table->idx() > 0 && join_conditions != nullptr) {
-        join_conditions->push_back(PendingCondition{item, current_table->idx()});
+        join_conditions->push_back(
+            PendingCondition{item, current_table->idx()});
       } else if (predicates_above_join != nullptr) {
-        predicates_above_join->push_back(PendingCondition{item, current_table->idx()});
+        predicates_above_join->push_back(
+            PendingCondition{item, current_table->idx()});
       } else if (predicates_below_join != nullptr) {
         predicates_below_join->push_back(item);
       }
       continue;
     }
-    // =================================================================
     Item_func_trig_cond *trig_cond = GetTriggerCondOrNull(item);
     if (trig_cond != nullptr) {
       Item *inner_cond = trig_cond->arguments()[0];
@@ -1811,23 +1811,20 @@ AccessPath *GetTableAccessPath(THD *thd, QEP_TAB *qep_tab, QEP_TAB *qep_tabs) {
     table_map conditions_depend_on_outer_tables = 0;
     vector<PendingInvalidator> pending_invalidators;
 
-    // --- Subquery root-level bucket ---
     vector<PendingCondition> sjm_pending_conditions;
 
     AccessPath *subtree_path = ConnectJoins(
         /*upper_first_idx=*/NO_PLAN_IDX, join_start, join_end, qep_tabs, thd,
-        TOP_LEVEL,
-        &sjm_pending_conditions, &pending_invalidators, // <-- Passed here
+        TOP_LEVEL, &sjm_pending_conditions, &pending_invalidators,
         /*pending_join_conditions=*/nullptr, &unhandled_duplicates,
         &conditions_depend_on_outer_tables);
 
-    // --- Attach bubbled-up semantic filters to the subquery root ---
     if (!sjm_pending_conditions.empty()) {
       vector<Item *> sem_conds;
       for (const auto &pc : sjm_pending_conditions) {
         sem_conds.push_back(pc.cond);
       }
-      subtree_path = PossiblyAttachFilter(subtree_path, sem_conds, thd, 
+      subtree_path = PossiblyAttachFilter(subtree_path, sem_conds, thd,
                                           &conditions_depend_on_outer_tables);
     }
 
@@ -1988,6 +1985,33 @@ static bool ConditionIsAlwaysTrue(Item *item) {
   return item->const_item() && item->val_bool();
 }
 
+/**
+  Keep the physical classic-optimizer tree consistent with the cardinalities
+  used to choose a semantic plan.  Native SetCostOn* helpers use MySQL's fixed
+  equality defaults and can otherwise recreate estimates many orders of
+  magnitude larger than the refiner's unique-domain estimate.  Override only
+  the row annotation: join choice, iterator type and native cost stay fixed.
+*/
+static void ApplySemanticCorrectedPrefixRows(const QEP_TAB *qep_tab,
+                                             AccessPath *path) {
+  if (qep_tab == nullptr || path == nullptr ||
+      (path->type != AccessPath::HASH_JOIN &&
+       path->type != AccessPath::NESTED_LOOP_JOIN)) {
+    return;
+  }
+  JOIN *const join = qep_tab->join();
+  if (join == nullptr || !join->has_semantic_operators ||
+      join->semantic_plan_refiner == nullptr) {
+    return;
+  }
+
+  double corrected_rows = 0.0;
+  if (join->semantic_plan_refiner->WinningCorrectedPrefixRows(
+          static_cast<uint>(qep_tab->idx()), &corrected_rows)) {
+    path->set_num_output_rows(corrected_rows);
+  }
+}
+
 // Returns true if the item refers to only one side of the join. This is used to
 // determine whether an equi-join conditions need to be attached as an "extra"
 // condition (pure join conditions must refer to both sides of the join).
@@ -2007,66 +2031,83 @@ static bool ItemRefersToOneSideOnly(Item *item, table_map left_side,
   Create an AccessPath for a semantic (LLM-based) join.
 */
 static AccessPath *CreateSemanticJoinAccessPath(
-    THD *thd, QEP_TAB *qep_tab, AccessPath *build_path,
-    qep_tab_map build_tables, AccessPath *probe_path, qep_tab_map probe_tables,
-    JoinType join_type, std::vector<Item *> *join_conditions,
+    THD *thd, AccessPath *build_path, AccessPath *probe_path,
+    std::vector<Item *> *join_conditions, JoinType join_type,
     table_map *conditions_depend_on_outer_tables) {
-
-  log_to_file("CreateSemanticJoinAccessPath: begin");
-
-  // ----- 1. 构造 RelationalExpression -----
-  RelationalExpression *expr =
-      new (thd->mem_root) RelationalExpression(thd);
-
-  // 语义 join 只支持 inner join 语义，避免和 outer/semi/anti 的 NULL 语义冲突
+  RelationalExpression *expr = new (thd->mem_root) RelationalExpression(thd);
   expr->type = RelationalExpression::INNER_JOIN;
-
-  // HGO 场景下的 left/right 在这里用不到，先置空
-  expr->left  = nullptr;
+  expr->left = nullptr;
   expr->right = nullptr;
 
-  // 把所有 join_conditions 都挂在 join_conditions 里（包括 SEM_JOIN(...)）
+  std::vector<Item *> remaining_conditions;
   if (join_conditions != nullptr) {
+    remaining_conditions.reserve(join_conditions->size());
     for (Item *item : *join_conditions) {
       if (item == nullptr) continue;
-      expr->join_conditions.push_back(item);
-      // 记录依赖的外层表，用于 optimizer 之后的分析
-      *conditions_depend_on_outer_tables |= item->used_tables();
+      if (Item_func_sem_join *semantic_join = AsSemJoin(item)) {
+        expr->join_conditions.push_back(semantic_join);
+        *conditions_depend_on_outer_tables |= semantic_join->used_tables();
+      } else {
+        if (ItemHasSemJoin(item) && !thd->is_error()) {
+          my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                   "SEM_JOIN wrapped in a boolean expression");
+        }
+        remaining_conditions.push_back(item);
+      }
     }
-    // 防止后续逻辑（例如 PossiblyAttachFilter）再次使用这些谓词
-    join_conditions->clear();
+    *join_conditions = std::move(remaining_conditions);
   }
-
-  // 语义 join 不做 equi-join 拆分
+  assert(!expr->join_conditions.empty());
+  if (join_type != JoinType::INNER && !thd->is_error()) {
+    my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+             "SEM_JOIN with a non-inner join");
+  }
+  if (expr->join_conditions.size() != 1 && !thd->is_error()) {
+    my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+             "multiple SEM_JOIN predicates on one join");
+  }
   expr->equijoin_conditions.clear();
 
-  // ----- 2. 构造 JoinPredicate -----
   JoinPredicate *pred = new (thd->mem_root) JoinPredicate;
   pred->expr = expr;
 
-  // ----- 3. 调用 helper 构造 AccessPath -----
-  //
-  // 和 HASH_JOIN 一样，把 probe 作为 outer，build 作为 inner：
-  //   Hash join: path->hash_join().outer = probe_path;
-  //              path->hash_join().inner = build_path;
-  //
-  // 语义 join 也沿用这个约定。
   AccessPath *path =
       NewSemLLMJoinAccessPath(thd, /*outer=*/probe_path,
-                                    /*inner=*/build_path,
-                                    /*pred=*/pred);
+                              /*inner=*/build_path, /*pred=*/pred);
 
-  // ----- 4. cost estimation -----
-  //
-  // 语义 join 的开销（LLM 调用次数、batch 大小等）来设计更合理的模型。
-  path->cost = 1e4;  // placeholder
-  path->num_output_rows_before_filter = 1000;
+  const double build_rows = build_path->num_output_rows();
+  const double probe_rows = probe_path->num_output_rows();
+  if (build_rows >= 0.0 && probe_rows >= 0.0 && std::isfinite(build_rows) &&
+      std::isfinite(probe_rows)) {
+    const long double joined_rows =
+        static_cast<long double>(build_rows) * probe_rows;
+    const long double maximum_rows = std::numeric_limits<double>::max();
+    const double bounded_joined_rows =
+        static_cast<double>(std::min(joined_rows, maximum_rows));
+    const double selectivity =
+        vipersql::GetSemanticProfile().binary_join.default_selectivity;
+    assert(std::isfinite(selectivity));
+    assert(selectivity > 0.0 && selectivity <= 1.0);
+    path->num_output_rows_before_filter = bounded_joined_rows;
+    path->set_num_output_rows(bounded_joined_rows * selectivity);
 
-  log_to_file("CreateSemanticJoinAccessPath: end");
+    if (build_path->cost >= 0.0 && probe_path->cost >= 0.0 &&
+        std::isfinite(build_path->cost) && std::isfinite(probe_path->cost)) {
+      const double semantic_cost =
+          thd->cost_model()->semantic_join_evaluate_cost(
+              std::min(build_rows, probe_rows),
+              std::max(build_rows, probe_rows));
+      const long double total_cost =
+          static_cast<long double>(build_path->cost) + probe_path->cost +
+          semantic_cost;
+      path->cost = static_cast<double>(std::min(
+          total_cost,
+          static_cast<long double>(std::numeric_limits<double>::max())));
+    }
+  }
+
   return path;
 }
-
-
 
 // Create a hash join iterator with the given build and probe input. We will
 // move conditions from the argument "join_conditions" into two separate lists;
@@ -2412,12 +2453,10 @@ AccessPath *FinishPendingOperations(
     }
   }
 
-  // Layer 1: Attach normal relational conditions first
   if (!normal_conds.empty()) {
     path = PossiblyAttachFilter(path, normal_conds, thd,
                                 conditions_depend_on_outer_tables);
   }
-  // Layer 2: Attach semantic conditions last
   if (!sem_conds.empty()) {
     path = PossiblyAttachFilter(path, sem_conds, thd,
                                 conditions_depend_on_outer_tables);
@@ -2436,69 +2475,51 @@ AccessPath *FinishPendingOperations(
   return path;
 }
 
-// Safely digs through MySQL's "0 <> func" or "func = 1" wrappers
-static Item_func* ExtractUnderlyingSemJoin(Item* cond) {
-    if (!cond) return nullptr;
-    if (cond->type() == Item::FUNC_ITEM) {
-        Item_func* f = down_cast<Item_func*>(cond);
-        if (my_strcasecmp(system_charset_info, f->func_name(), "sem_join") == 0) {
-            return f;
-        }
-        // Unwrap boolean comparisons
-        if (f->functype() == Item_func::EQ_FUNC || f->functype() == Item_func::NE_FUNC) {
-            for (uint i = 0; i < f->argument_count(); ++i) {
-                Item* arg = f->arguments()[i];
-                if (arg->type() == Item::FUNC_ITEM) {
-                    Item_func* arg_f = down_cast<Item_func*>(arg);
-                    if (my_strcasecmp(system_charset_info, arg_f->func_name(), "sem_join") == 0) {
-                        return arg_f;
-                    }
-                }
-            }
-        }
+// Move semantic joins to the first join that provides all required tables.
+static void HoistPrematureSemJoins(
+    std::vector<Item *> &join_conditions, table_map left_tables,
+    table_map right_tables, THD *thd,
+    std::vector<PendingCondition> *pending_join_conditions) {
+  std::vector<Item *> ready_conditions;
+  for (Item *condition : join_conditions) {
+    Item_func_sem_join *semantic_function = AsSemJoin(condition);
+    if (semantic_function == nullptr) {
+      if (ItemHasSemJoin(condition) && !thd->is_error()) {
+        my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                 "SEM_JOIN wrapped in a boolean expression");
+      }
+      ready_conditions.push_back(condition);
+      continue;
     }
-    return nullptr;
-}
 
-// Checks physical tables and unwraps the function for the Iterator Factory
-static void HoistPrematureSemJoins(std::vector<Item *> &join_conditions,
-                                   table_map left_tables,
-                                   table_map right_tables,
-                                   std::vector<PendingCondition> *pending_join_conditions) {
-    std::vector<Item *> ready_conditions;
-    for (Item *cond : join_conditions) {
-        Item_func* sem_func = ExtractUnderlyingSemJoin(cond);
-        if (sem_func != nullptr) {
-            table_map physical_tables = 0;
-            
-            // Bypass Equivalence Classes to find the real physical tables
-            for (uint j = 1; j < sem_func->argument_count(); ++j) {
-                Item *real = sem_func->arguments()[j]->real_item();
-                if (real->type() == Item::FIELD_ITEM) {
-                    Item_field *field_item = static_cast<Item_field*>(real);
-                    if (field_item->field && field_item->field->table && field_item->field->table->pos_in_table_list) {
-                        physical_tables |= field_item->field->table->pos_in_table_list->map();
-                    }
-                }
-            }
-            if (physical_tables == 0) physical_tables = sem_func->used_tables();
-            
-            table_map edge_tables = left_tables | right_tables;
-            
-            if ((physical_tables & ~edge_tables) == 0 && physical_tables != 0) {
-                // READY: Push the UNWRAPPED sem_func so the iterator parses the prompt!
-                ready_conditions.push_back(sem_func);
-            } else {
-                // PREMATURE: Hoist the ORIGINAL wrapped condition back up the tree
-                if (pending_join_conditions != nullptr) {
-                    pending_join_conditions->push_back({cond});
-                }
-            }
-        } else {
-            ready_conditions.push_back(cond);
-        }
+    table_map physical_tables = 0;
+    for (uint i = 1; i < semantic_function->argument_count(); ++i) {
+      Item *real_item = semantic_function->arguments()[i]->real_item();
+      if (real_item->type() != Item::FIELD_ITEM) continue;
+      Item_field *field_item = static_cast<Item_field *>(real_item);
+      if (field_item->field != nullptr && field_item->field->table != nullptr &&
+          field_item->field->table->pos_in_table_list != nullptr) {
+        physical_tables |= field_item->field->table->pos_in_table_list->map();
+      }
     }
-    join_conditions = std::move(ready_conditions);
+    if (physical_tables == 0) {
+      physical_tables = semantic_function->used_tables();
+    }
+
+    const table_map edge_tables = left_tables | right_tables;
+    if (physical_tables != 0 && (physical_tables & ~edge_tables) == 0) {
+      ready_conditions.push_back(condition);
+    } else if (pending_join_conditions != nullptr) {
+      pending_join_conditions->push_back({condition});
+    } else {
+      if (!thd->is_error()) {
+        my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                 "SEM_JOIN referencing unavailable join tables");
+      }
+      ready_conditions.push_back(condition);
+    }
+  }
+  join_conditions = std::move(ready_conditions);
 }
 
 /**
@@ -2834,20 +2855,16 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
                   UseBKA(qep_tab)) &&
                  !QueryMixesOuterBKAAndBNL(qep_tab->join())) {
         vector<Item *> join_conditions;
-        PickOutConditionsForTableIndex(i, &subtree_pending_join_conditions, &join_conditions);
+        PickOutConditionsForTableIndex(i, &subtree_pending_join_conditions,
+                                       &join_conditions);
 
-        HoistPrematureSemJoins(join_conditions, left_tables, right_tables, &subtree_pending_join_conditions);
+        HoistPrematureSemJoins(join_conditions, left_tables, right_tables, thd,
+                               &subtree_pending_join_conditions);
 
         if (JoinConditionsHaveSemJoin(join_conditions)) {
-            path = CreateSemanticJoinAccessPath(
-                thd, qep_tab,
-                /*build=*/ subtree_path,
-                /*build tables=*/ right_tables,
-                /*probe=*/ path,
-                /*probe tables=*/ left_tables,
-                join_type,
-                &join_conditions,
-                conditions_depend_on_outer_tables);
+          path = CreateSemanticJoinAccessPath(
+              thd, /*build_path=*/subtree_path, /*probe_path=*/path,
+              &join_conditions, join_type, conditions_depend_on_outer_tables);
         } else if (UseBKA(qep_tab)) {
           path = CreateBKAAccessPath(thd, qep_tab->join(), path, left_tables,
                                      subtree_path, right_tables,
@@ -2869,25 +2886,22 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
         // Similar to hash join above, pick out those conditions and add them
         // here.
         vector<Item *> join_conditions;
-        PickOutConditionsForTableIndex(i, &subtree_pending_join_conditions, &join_conditions);
+        PickOutConditionsForTableIndex(i, &subtree_pending_join_conditions,
+                                       &join_conditions);
 
-        HoistPrematureSemJoins(join_conditions, left_tables, right_tables, &subtree_pending_join_conditions);
+        HoistPrematureSemJoins(join_conditions, left_tables, right_tables, thd,
+                               &subtree_pending_join_conditions);
 
         if (JoinConditionsHaveSemJoin(join_conditions)) {
-            path = CreateSemanticJoinAccessPath(
-                thd, qep_tab,
-                /*build=*/ path,
-                /*build tables=*/ left_tables,
-                /*probe=*/ subtree_path, 
-                /*probe tables=*/ right_tables,
-                join_type,
-                &join_conditions,
-                conditions_depend_on_outer_tables);
+          path = CreateSemanticJoinAccessPath(
+              thd, /*build_path=*/path, /*probe_path=*/subtree_path,
+              &join_conditions, join_type, conditions_depend_on_outer_tables);
         } else {
-            subtree_path = PossiblyAttachFilter(subtree_path, join_conditions, thd,
-                                                conditions_depend_on_outer_tables);
-            path = CreateNestedLoopAccessPath(thd, path, subtree_path, join_type,
-                                              pfs_batch_mode);
+          subtree_path =
+              PossiblyAttachFilter(subtree_path, join_conditions, thd,
+                                   conditions_depend_on_outer_tables);
+          path = CreateNestedLoopAccessPath(thd, path, subtree_path, join_type,
+                                            pfs_batch_mode);
         }
         SetCostOnNestedLoopAccessPath(*thd->cost_model(), qep_tab->position(),
                                       path);
@@ -3007,18 +3021,20 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
       // (i.e. filters).
       ExtractJoinConditions(qep_tab, &predicates_below_join, &join_conditions);
     }
-    // --- NEW: Intercept SEM_JOIN from the optimizer's pushed conditions ---
-    vector<Item*> intercepted_sem_joins;
-    vector<Item*> normal_preds;
-    for (Item* cond : predicates_below_join) {
-        if (ExtractUnderlyingSemJoin(cond) != nullptr) {
-            intercepted_sem_joins.push_back(cond);
-        } else {
-            normal_preds.push_back(cond);
+    vector<Item *> intercepted_semantic_joins;
+    vector<Item *> ordinary_predicates;
+    for (Item *condition : predicates_below_join) {
+      if (AsSemJoin(condition) != nullptr) {
+        intercepted_semantic_joins.push_back(condition);
+      } else {
+        if (ItemHasSemJoin(condition) && !thd->is_error()) {
+          my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                   "SEM_JOIN wrapped in a boolean expression");
         }
+        ordinary_predicates.push_back(condition);
+      }
     }
-    predicates_below_join = std::move(normal_preds);
-    // ----------------------------------------------------------------------
+    predicates_below_join = std::move(ordinary_predicates);
 
     if (!qep_tab->condition_is_pushed_to_sort()) {  // See the comment on #2.
       double expected_rows = table_path->num_output_rows();
@@ -3117,30 +3133,28 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
       } else if (replace_with_hash_join) {
         // The numerically lower QEP_TAB is often (if not always) the smaller
         // input, so use that as the build input.
-        if (pending_join_conditions != nullptr){
+        if (pending_join_conditions != nullptr) {
           PickOutConditionsForTableIndex(i, pending_join_conditions,
                                          &join_conditions);
         }
-        // Add the intercepted conditions
-        join_conditions.insert(join_conditions.end(), intercepted_sem_joins.begin(), intercepted_sem_joins.end());
-        
-        HoistPrematureSemJoins(join_conditions, left_tables, right_tables, pending_join_conditions);
+        join_conditions.insert(join_conditions.end(),
+                               intercepted_semantic_joins.begin(),
+                               intercepted_semantic_joins.end());
+
+        HoistPrematureSemJoins(join_conditions, left_tables, right_tables, thd,
+                               pending_join_conditions);
 
         if (JoinConditionsHaveSemJoin(join_conditions)) {
-            path = CreateSemanticJoinAccessPath(
-                thd, qep_tab,
-                /*build=*/ path,
-                /*build tables=*/ left_tables,
-                /*probe=*/ table_path,
-                /*probe tables=*/ right_tables,
-                JoinType::INNER,
-                &join_conditions,
-                conditions_depend_on_outer_tables);
+          path = CreateSemanticJoinAccessPath(
+              thd, /*build_path=*/path, /*probe_path=*/table_path,
+              &join_conditions, JoinType::INNER,
+              conditions_depend_on_outer_tables);
         } else {
-            path = CreateHashJoinAccessPath(thd, qep_tab, path, left_tables,
+          path = CreateHashJoinAccessPath(thd, qep_tab, path, left_tables,
                                           table_path, right_tables,
                                           JoinType::INNER, &join_conditions,
                                           conditions_depend_on_outer_tables);
+          ApplySemanticCorrectedPrefixRows(qep_tab, path);
         }
 
         // Attach any remaining non-equi-join conditions as a filter after the
@@ -3150,31 +3164,32 @@ AccessPath *ConnectJoins(plan_idx upper_first_idx, plan_idx first_idx,
       } else {
         vector<Item *> inner_join_conditions;
         if (pending_join_conditions != nullptr) {
-            PickOutConditionsForTableIndex(i, pending_join_conditions, &inner_join_conditions);
+          PickOutConditionsForTableIndex(i, pending_join_conditions,
+                                         &inner_join_conditions);
         }
 
-        inner_join_conditions.insert(inner_join_conditions.end(), intercepted_sem_joins.begin(), intercepted_sem_joins.end());
-        
-        HoistPrematureSemJoins(inner_join_conditions, left_tables, right_tables, pending_join_conditions);
+        inner_join_conditions.insert(inner_join_conditions.end(),
+                                     intercepted_semantic_joins.begin(),
+                                     intercepted_semantic_joins.end());
+
+        HoistPrematureSemJoins(inner_join_conditions, left_tables, right_tables,
+                               thd, pending_join_conditions);
 
         if (JoinConditionsHaveSemJoin(inner_join_conditions)) {
-            path = CreateSemanticJoinAccessPath(
-                thd, qep_tab,
-                /*build=*/ path,
-                /*build tables=*/ left_tables,
-                /*probe=*/ table_path, 
-                /*probe tables=*/ right_tables,
-                JoinType::INNER,
-                &inner_join_conditions,
-                conditions_depend_on_outer_tables);
+          path = CreateSemanticJoinAccessPath(
+              thd, /*build_path=*/path, /*probe_path=*/table_path,
+              &inner_join_conditions, JoinType::INNER,
+              conditions_depend_on_outer_tables);
         } else {
-            path = CreateNestedLoopAccessPath(
-                thd, path, table_path, JoinType::INNER,
-                qep_tab->pfs_batch_update(qep_tab->join()));
-            path = PossiblyAttachFilter(path, inner_join_conditions, thd, conditions_depend_on_outer_tables);
+          path = CreateNestedLoopAccessPath(
+              thd, path, table_path, JoinType::INNER,
+              qep_tab->pfs_batch_update(qep_tab->join()));
+          SetCostOnNestedLoopAccessPath(*thd->cost_model(), qep_tab->position(),
+                                        path);
+          ApplySemanticCorrectedPrefixRows(qep_tab, path);
+          path = PossiblyAttachFilter(path, inner_join_conditions, thd,
+                                      conditions_depend_on_outer_tables);
         }
-        SetCostOnNestedLoopAccessPath(*thd->cost_model(), qep_tab->position(),
-                                      path);
       }
     }
     ++i;
@@ -3325,13 +3340,12 @@ AccessPath *JOIN::create_root_access_path_for_join() {
       CopyBasicProperties(*child, path);
     }
 
-    // Attach bubbled-up semantic filters to the final root
     if (!global_pending_conditions.empty()) {
       vector<Item *> root_sem_conds;
       for (const auto &pc : global_pending_conditions) {
         root_sem_conds.push_back(pc.cond);
       }
-      path = PossiblyAttachFilter(path, root_sem_conds, thd, 
+      path = PossiblyAttachFilter(path, root_sem_conds, thd,
                                   &conditions_depend_on_outer_tables);
     }
   }
@@ -4369,53 +4383,6 @@ bool check_unique_constraint(TABLE *table) {
         table->record[1], table->hash_field->field_ptr(), sizeof(hash));
   }
   return true;
-}
-
-/**
-  Compute the 64-bit GROUP BY key for the current row, storing
-  it into the table’s hidden hash_field if present.
-
-  This handles both:
-   - the “using_hash_key()” path (unique_hash_* calls), and
-   - the “no hash field” path (falls back to hashing the raw group
-     key buffer via unique_hash_group()).
-
-  @param  table  the temp-table
-  @return the 64-bit hash for this row’s GROUP BY key
-*/
-ulonglong compute_group_hash(TABLE *table, Temp_table_param *m_temp_table_param,
-                            std::unordered_map<uint64_t, std::string> *hash_to_rawkey) {
-  bool old_no_keyread = table->no_keyread;
-  table->no_keyread   = false;
-
-  ulonglong h = 0;
-  if (table->hash_field) {
-    h = table->group
-        ? unique_hash_group(table->group)
-        : unique_hash_fields(table);
-    table->hash_field->store(h, /*save_org=*/true);
-  } else {
-    // Prepare group_buff as per the CPU version
-    for (ORDER *grp = table->group; grp; grp = grp->next) {
-        Item *item = *grp->item;
-        item->save_org_in_field(grp->field_in_tmp_table);
-        if (item->is_nullable())
-            grp->buff[-1] = (char)grp->field_in_tmp_table->is_null();
-    }
-
-    if (hash_to_rawkey && m_temp_table_param->group_length > sizeof(ulonglong)) {
-      h = unique_hash_group(table->group);
-      std::string raw_value(reinterpret_cast<const char *>(m_temp_table_param->group_buff), 
-                              m_temp_table_param->group_length);
-      (*hash_to_rawkey)[h] = raw_value;
-    }
-    else {
-      memcpy(&h, m_temp_table_param->group_buff, sizeof(ulonglong));
-    }
-  }
-
-  table->no_keyread = old_no_keyread;
-  return h;
 }
 
 bool construct_lookup(THD *thd, TABLE *table, Index_lookup *ref) {

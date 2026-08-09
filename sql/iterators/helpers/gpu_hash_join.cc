@@ -1,292 +1,232 @@
 #include "sql/iterators/helpers/gpu_hash_join.h"
 
+#include <cuda_runtime.h>
+
+#include <algorithm>
+#include <cstring>
+#include <limits>
+#include <new>
 
 namespace gpuhashjoinhelpers {
+namespace {
 
-// Constructor
-GPUHashJoinHelper::GPUHashJoinHelper() : d_keys_(nullptr), d_indices_(nullptr), d_hash_table_(nullptr),
-                                         d_probe_keys_(nullptr), d_result_indices_(nullptr),
-                                         capacity_(0), stream_(nullptr),
-                                         current_status_("UNINITIALIZED") {}
-
-GPUHashJoinHelper::GPUHashJoinHelper(size_t batch_size_)
-    : d_keys_(nullptr), d_indices_(nullptr), d_hash_table_(nullptr),
-      d_probe_keys_(nullptr), d_result_indices_(nullptr),
-      capacity_(0), stream_(nullptr),
-      batch_size(batch_size_), current_status_("UNINITIALIZED") {}
-
-
-// Destructor
-GPUHashJoinHelper::~GPUHashJoinHelper() {
-  Destroy();
+size_t BucketCapacityForNodeCount(size_t node_count) {
+  size_t capacity = 1;
+  while (capacity < node_count && capacity < kMaxBucketCapacity) {
+    capacity <<= 1;
+  }
+  return capacity;
 }
 
-bool GPUHashJoinHelper::Init(size_t capacity) {
-  // Make sure the capacity_ is power of 2
-  if (capacity < MIN_TABLE_CAPACITY) {
-    capacity_ = MIN_TABLE_CAPACITY;
-  } else if (capacity > MAX_TABLE_CAPACITY) {
-    capacity_ = MAX_TABLE_CAPACITY;
-  } else {
-    capacity_ = 1;
-    while (capacity_ < capacity) {
-      capacity_ <<= 1;
-    }
-  }
-
-  cudaError_t err;
-
-  // Allocate GPU hash table: size = capacity (uint32_t indices or flags)
-  err = cudaMalloc(&d_hash_table_, capacity_ * sizeof(HashEntry));
-  if (err != cudaSuccess) {
-    log_to_file("cudaMalloc failed for d_hash_table_");
+bool AllocationSize(size_t count, size_t element_size, size_t *bytes) {
+  if (count > std::numeric_limits<size_t>::max() / element_size)
     return true;
-  }
-
-  // Zero entire memory (optional, to zero keys)
-  err = cudaMemset(d_hash_table_, 0, capacity_ * sizeof(HashEntry));
-  if (err != cudaSuccess) {
-    log_to_file("cudaMemset zero failed for d_hash_table_");
-    return true;
-  }
-
-  // Launch kernel to initialize index fields
-  if (gpuhashjoinhelpers::LaunchInitHashTableKernel(d_hash_table_, capacity_, NOT_FOUND, stream_)) {
-    return true;
-  }
-
-  // Allocate keys buffer (max capacity * max key size)
-  err = cudaMalloc(&d_keys_, batch_size * MAX_KEY_SIZE * sizeof(uint8_t));
-  if (err != cudaSuccess) {
-    log_to_file("cudaMalloc failed for d_keys_");
-    return true;
-  }
-
-  // Allocate keys buffer (max capacity * max key size)
-  err = cudaMalloc(&d_indices_, batch_size * sizeof(uint32_t));
-  if (err != cudaSuccess) {
-    log_to_file("cudaMalloc failed for d_indices_");
-    return true;
-  }
-
-  // Allocate probe keys buffer (same size as build keys buffer for simplicity)
-  err = cudaMalloc(&d_probe_keys_, batch_size * MAX_KEY_SIZE * sizeof(uint8_t));
-  if (err != cudaSuccess) {
-    log_to_file("cudaMalloc failed for d_probe_keys_");
-    return true;
-  }
-
-  // Allocate result indices buffer for matched pairs
-  err = cudaMalloc(&d_result_indices_, batch_size * sizeof(uint32_t));
-  if (err != cudaSuccess) {
-    log_to_file("cudaMalloc failed for d_result_indices_");
-    return true;
-  }
-
-  // Create CUDA stream
-  err = cudaStreamCreate(&stream_);
-  if (err != cudaSuccess) {
-    log_to_file("cudaStreamCreate failed");
-    return true;
-  }
-
-  current_status_ = "INITIALIZED";
-
+  *bytes = count * element_size;
   return false;
 }
 
-bool GPUHashJoinHelper::SubmitBatch(const void* host_data, size_t n_rows) {
+}  // namespace
+
+GPUHashJoinHelper::GPUHashJoinHelper(size_t batch_size)
+    : batch_size_(std::max<size_t>(1, batch_size)) {}
+
+GPUHashJoinHelper::~GPUHashJoinHelper() { Destroy(); }
+
+bool GPUHashJoinHelper::Init() {
+  Destroy();
+
+  host_probe_keys_.reset(new (std::nothrow) HashKey[batch_size_]);
+  host_result_indices_.reset(new (std::nothrow) uint32_t[batch_size_]);
+  if (host_probe_keys_ == nullptr || host_result_indices_ == nullptr ||
+      cudaMalloc(reinterpret_cast<void **>(&d_probe_keys_),
+                 batch_size_ * sizeof(HashKey)) != cudaSuccess ||
+      cudaMalloc(reinterpret_cast<void **>(&d_result_indices_),
+                 batch_size_ * sizeof(uint32_t)) != cudaSuccess) {
+    Destroy();
+    return true;
+  }
+
+  failed_ = false;
+  current_status_ = "INITIALIZED";
+  return false;
+}
+
+bool GPUHashJoinHelper::SubmitBatch(const void *host_data, size_t n_rows) {
+  if (failed_ || n_rows > batch_size_ ||
+      (n_rows != 0 && host_data == nullptr)) {
+    failed_ = true;
+    return true;
+  }
+  if (n_rows == 0) {
+    last_n_tuples_ = 0;
+    return false;
+  }
+
   if (current_status_ == "BUILD") {
     return SubmitBuildBatch(host_data, n_rows);
-  } else if (current_status_ == "PROBE") {
-    return SubmitProbeBatch(host_data, n_rows);
-  } else {
-    log_to_file("SubmitBatch called in unknown status: " + current_status_);
-    return true;
   }
+  if (current_status_ == "PROBE") {
+    return SubmitProbeBatch(host_data, n_rows);
+  }
+  failed_ = true;
+  return true;
 }
 
-// Helper to pack array of SQL String into PackedKey array for GPU
-static bool PackKeyForGPU(const std::string& host_string, PackedKey* out_packed_key) {
-  size_t len = host_string.size();
-  if (len > MAX_KEY_SIZE) {
-    log_to_file("PackKeyForGPU: key length exceeds MAX_KEY_SIZE: " + std::to_string(len));
-    return true;
+bool GPUHashJoinHelper::SubmitBuildBatch(const void *host_data, size_t n_rows) {
+  const auto *pairs = static_cast<const KeyIndexPair *>(host_data);
+  for (size_t i = 0; i < n_rows; ++i) {
+    if (pairs[i].index == kNotFound) {
+      failed_ = true;
+      return true;
+    }
+    host_build_nodes_.push_back(
+        HashNode{pairs[i].key, pairs[i].index, kNotFound});
   }
-
-  memcpy(out_packed_key->data, host_string.data(), len);
-  if (len < MAX_KEY_SIZE) {
-    memset(out_packed_key->data + len, 0, MAX_KEY_SIZE - len);
-  }
+  last_n_tuples_ = 0;
   return false;
 }
 
-bool GPUHashJoinHelper::SubmitBuildBatch(const void* host_data, size_t n_rows) {
-  const KeyIndexPair* pairs = static_cast<const KeyIndexPair*>(host_data);
+bool GPUHashJoinHelper::FinalizeBuildIndex() {
+  if (build_finalized_)
+    return false;
+  if (failed_)
+    return true;
 
-  std::vector<PackedKey> packed_keys(n_rows);
-  std::vector<uint32_t> indices(n_rows);
+  ReleaseBuildIndex();
+  bucket_capacity_ = BucketCapacityForNodeCount(host_build_nodes_.size());
 
-  for (size_t i = 0; i < n_rows; ++i) {
-    if (PackKeyForGPU(pairs[i].key, &packed_keys[i]))
-      return true;
-    indices[i] = static_cast<uint32_t>(pairs[i].index);
+  size_t node_bytes = 0;
+  size_t bucket_bytes = 0;
+  if (AllocationSize(host_build_nodes_.size(), sizeof(HashNode), &node_bytes) ||
+      AllocationSize(bucket_capacity_, sizeof(uint32_t), &bucket_bytes) ||
+      node_bytes > std::numeric_limits<size_t>::max() - bucket_bytes) {
+    failed_ = true;
+    return true;
   }
 
-  cudaMemcpyAsync(d_keys_, packed_keys.data(), n_rows * sizeof(PackedKey),
-                  cudaMemcpyHostToDevice, stream_);
-  cudaMemcpyAsync(d_indices_, indices.data(), n_rows * sizeof(uint32_t),
-                  cudaMemcpyHostToDevice, stream_);
+  if (cudaMalloc(reinterpret_cast<void **>(&d_bucket_heads_), bucket_bytes) !=
+      cudaSuccess) {
+    failed_ = true;
+    ReleaseBuildIndex();
+    return true;
+  }
 
-  // Launch build kernel (wrapper function implemented in .cu)
-  return gpuhashjoinhelpers::LaunchBuildKernel(
-      d_keys_, d_indices_, d_hash_table_, capacity_, n_rows, stream_);
-}
-
-bool GPUHashJoinHelper::SubmitProbeBatch(const void* host_data, size_t n_rows) {
-  const KeyIndexPair* pairs = static_cast<const KeyIndexPair*>(host_data);
-
-  std::vector<PackedKey> packed_probe_keys(n_rows);
-
-  for (size_t i = 0; i < n_rows; ++i) {
-    if (PackKeyForGPU(pairs[i].key, &packed_probe_keys[i])) {
+  if (!host_build_nodes_.empty()) {
+    if (cudaMalloc(reinterpret_cast<void **>(&d_nodes_), node_bytes) !=
+            cudaSuccess ||
+        cudaMemcpy(d_nodes_, host_build_nodes_.data(), node_bytes,
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      failed_ = true;
+      ReleaseBuildIndex();
       return true;
     }
   }
 
-  cudaError_t err;
-
-  err = cudaMemcpyAsync(d_probe_keys_, packed_probe_keys.data(),
-                        n_rows * sizeof(PackedKey),
-                        cudaMemcpyHostToDevice, stream_);
-  if (err != cudaSuccess) {
-    log_to_file("cudaMemcpyAsync failed for probe keys in SubmitProbeBatch");
+  if (LaunchInitBucketHeadsKernel(d_bucket_heads_, bucket_capacity_) ||
+      (!host_build_nodes_.empty() &&
+       LaunchBuildBucketIndexKernel(d_nodes_, host_build_nodes_.size(),
+                                    d_bucket_heads_, bucket_capacity_)) ||
+      cudaDeviceSynchronize() != cudaSuccess) {
+    failed_ = true;
     return true;
   }
-  last_n_tuples = n_rows;
 
-  // Launch probe kernel with keys and indices buffers
-  return gpuhashjoinhelpers::LaunchProbeKernel(
-      d_probe_keys_, n_rows,
-      d_hash_table_,
-      capacity_,
-      d_result_indices_,
-      stream_);
+  build_finalized_ = true;
+  return false;
 }
 
-bool GPUHashJoinHelper::FetchResults(void* out_buffer, size_t* out_result_count) {
-  if (!out_buffer || !out_result_count) return true;
+bool GPUHashJoinHelper::SubmitProbeBatch(const void *host_data, size_t n_rows) {
+  if (FinalizeBuildIndex())
+    return true;
 
-  // Return zero results if not in PROBE phase
+  const auto *pairs = static_cast<const KeyIndexPair *>(host_data);
+  for (size_t i = 0; i < n_rows; ++i)
+    host_probe_keys_[i] = pairs[i].key;
+
+  if (cudaMemcpy(d_probe_keys_, host_probe_keys_.get(),
+                 n_rows * sizeof(HashKey), cudaMemcpyHostToDevice) !=
+          cudaSuccess ||
+      LaunchProbeKernel(d_probe_keys_, n_rows, d_nodes_, d_bucket_heads_,
+                        bucket_capacity_, d_result_indices_) ||
+      cudaDeviceSynchronize() != cudaSuccess ||
+      cudaMemcpy(host_result_indices_.get(), d_result_indices_,
+                 n_rows * sizeof(uint32_t), cudaMemcpyDeviceToHost) !=
+          cudaSuccess) {
+    failed_ = true;
+    return true;
+  }
+
+  last_n_tuples_ = n_rows;
+  return false;
+}
+
+bool GPUHashJoinHelper::FetchResults(void *out_buffer,
+                                     size_t *out_result_count) {
+  if (out_result_count == nullptr ||
+      (last_n_tuples_ != 0 && out_buffer == nullptr)) {
+    failed_ = true;
+    return true;
+  }
+
   if (current_status_ != "PROBE") {
     *out_result_count = 0;
     return false;
   }
 
-  // Copy entire device result buffer (size = batch_size) to host directly into out_buffer
-  cudaError_t err = cudaMemcpy(out_buffer, d_result_indices_,
-                               batch_size * sizeof(uint32_t),
-                               cudaMemcpyDeviceToHost);
-  if (err != cudaSuccess) {
-    log_to_file("cudaMemcpy failed in FetchResults");
-    return true;
+  if (last_n_tuples_ != 0) {
+    std::memcpy(out_buffer, host_result_indices_.get(),
+                last_n_tuples_ * sizeof(uint32_t));
   }
 
-  *out_result_count = last_n_tuples;
+  *out_result_count = last_n_tuples_;
   return false;
 }
 
 bool GPUHashJoinHelper::Synchronize() {
-  cudaError_t err = cudaStreamSynchronize(stream_);
-  if (err != cudaSuccess) {
-    log_to_file("cudaStreamSynchronize failed in Synchronize");
-    return true;
-  }
-  return false;
+  return failed_;
 }
 
-bool GPUHashJoinHelper::IsIdle() const {
-  if (stream_ == nullptr) return true;
-  const cudaError_t err = cudaStreamQuery(stream_);
-  if (err == cudaSuccess) return true;
-  if (err == cudaErrorNotReady) return false;
-  return false;
+bool GPUHashJoinHelper::IsIdle() const { return true; }
+
+void GPUHashJoinHelper::ReleaseBuildIndex() {
+  if (d_nodes_ != nullptr) {
+    cudaFree(d_nodes_);
+    d_nodes_ = nullptr;
+  }
+  if (d_bucket_heads_ != nullptr) {
+    cudaFree(d_bucket_heads_);
+    d_bucket_heads_ = nullptr;
+  }
+  bucket_capacity_ = 0;
+  build_finalized_ = false;
 }
 
 void GPUHashJoinHelper::Destroy() {
-  if (d_keys_) {
-    cudaFree(d_keys_);
-    d_keys_ = nullptr;
-  }
-  if (d_indices_) {
-    cudaFree(d_indices_);
-    d_indices_ = nullptr;
-  }
-  if (d_hash_table_) {
-    cudaFree(d_hash_table_);
-    d_hash_table_ = nullptr;
-  }
-  if (d_probe_keys_) {
+  ReleaseBuildIndex();
+  if (d_probe_keys_ != nullptr) {
     cudaFree(d_probe_keys_);
     d_probe_keys_ = nullptr;
   }
-  if (d_result_indices_) {
+  if (d_result_indices_ != nullptr) {
     cudaFree(d_result_indices_);
     d_result_indices_ = nullptr;
   }
-  if (stream_) {
-    cudaStreamDestroy(stream_);
-    stream_ = nullptr;
-  }
+  host_probe_keys_.reset();
+  host_result_indices_.reset();
+  // Release retained build storage at the helper recovery boundary.
+  std::vector<HashNode>().swap(host_build_nodes_);
+  last_n_tuples_ = 0;
+  failed_ = false;
   current_status_ = "DESTROYED";
-  // log_to_file("GPUHashJoinHelper destroyed");
 }
 
-void GPUHashJoinHelper::SetStatus(const std::string& status) {
-  if (status == "BUILD" && d_hash_table_ != nullptr) {
-    gpuhashjoinhelpers::LaunchInitHashTableKernel(
-        d_hash_table_, capacity_, NOT_FOUND, stream_);
+void GPUHashJoinHelper::SetStatus(const std::string &status) {
+  if (status == "BUILD") {
+    ReleaseBuildIndex();
+    host_build_nodes_.clear();
+    last_n_tuples_ = 0;
   }
   current_status_ = status;
-  // log_to_file("GPUHashJoinHelper status set to: " + status);
-}
-
-void GPUHashJoinHelper::PrintHashTable() {
-  if (!d_hash_table_ || capacity_ == 0) {
-    log_to_file("PrintHashTable: Hash table not initialized");
-    return;
-  }
-
-  // Allocate host buffer for the entire hash table
-  std::vector<HashEntry> host_table(capacity_);
-
-  // Copy device hash table to host
-  cudaError_t err = cudaMemcpy(host_table.data(), d_hash_table_,
-                               capacity_ * sizeof(HashEntry),
-                               cudaMemcpyDeviceToHost);
-  if (err != cudaSuccess) {
-    log_to_file(std::string("PrintHashTable: cudaMemcpy failed: ") +
-                cudaGetErrorString(err));
-    return;
-  }
-
-  log_to_file("PrintHashTable: Dumping hash table contents:");
-
-  // Iterate and print valid entries
-  for (size_t i = 0; i < capacity_; ++i) {
-    const HashEntry& entry = host_table[i];
-    if (entry.index != NOT_FOUND) {
-      // Convert key bytes to hex string for readability
-      std::string key_hex;
-      for (int b = 0; b < MAX_KEY_SIZE; ++b) {
-        char buf[4];
-        snprintf(buf, sizeof(buf), "%02X ", entry.key.data[b]);
-        key_hex += buf;
-      }
-      log_to_file("Slot " + std::to_string(i) + ": index = " +
-                  std::to_string(entry.index) + ", key = " + key_hex);
-    }
-  }
 }
 
 }  // namespace gpuhashjoinhelpers

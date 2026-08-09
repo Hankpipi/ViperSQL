@@ -23,6 +23,7 @@
 #include "sql/join_optimizer/access_path.h"
 
 #include "my_base.h"
+#include "mysqld_error.h"
 #include "sql/filesort.h"
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
@@ -34,11 +35,11 @@
 #include "sql/iterators/delete_rows_iterator.h"
 #include "sql/iterators/hash_join_iterator.h"
 #include "sql/iterators/ref_row_iterators.h"
+#include "sql/iterators/sem_join_iterator.h"
 #include "sql/iterators/sorting_iterator.h"
 #include "sql/iterators/timing_iterator.h"
 #include "sql/iterators/window_iterators.h"
 #include "sql/iterators/vectorized_iterators.h"
-#include "sql/iterators/sem_join_iterator.h"
 #include "sql/join_optimizer/bit_utils.h"
 #include "sql/join_optimizer/cost_model.h"
 #include "sql/join_optimizer/estimate_selectivity.h"
@@ -56,10 +57,12 @@
 #include "sql/range_optimizer/range_optimizer.h"
 #include "sql/range_optimizer/reverse_index_range_scan.h"
 #include "sql/range_optimizer/rowid_ordered_retrieval.h"
+#include "sql/semantic_profile.h"
 #include "sql/sql_optimizer.h"
 #include "sql/sql_update.h"
 #include "sql/table.h"
 
+#include <cmath>
 #include <vector>
 
 using pack_rows::TableCollection;
@@ -261,18 +264,18 @@ Mem_root_array<TABLE *> CollectTables(THD *thd, AccessPath *root_path) {
  */
 static table_map GetNullableEqRefTables(const AccessPath *root_path) {
   table_map tables = 0;
-  WalkAccessPaths(
-      root_path, /*join=*/nullptr,
-      WalkAccessPathPolicy::STOP_AT_MATERIALIZATION,
-      [&tables](const AccessPath *path, const JOIN *) {
-        if (path->type == AccessPath::EQ_REF) {
-          const auto &param = path->eq_ref();
-          if (param.table->is_nullable() && !param.ref->disable_cache) {
-            tables |= param.table->pos_in_table_list->map();
-          }
-        }
-        return false;
-      });
+  WalkAccessPaths(root_path, /*join=*/nullptr,
+                  WalkAccessPathPolicy::STOP_AT_MATERIALIZATION,
+                  [&tables](const AccessPath *path, const JOIN *) {
+                    if (path->type == AccessPath::EQ_REF) {
+                      const auto &param = path->eq_ref();
+                      if (param.table->is_nullable() &&
+                          !param.ref->disable_cache) {
+                        tables |= param.table->pos_in_table_list->map();
+                      }
+                    }
+                    return false;
+                  });
   return tables;
 }
 
@@ -377,15 +380,16 @@ void SetupJobsForChildren(MEM_ROOT *mem_root, AccessPath *outer,
 
 }  // namespace
 
-unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
-    THD *thd, MEM_ROOT *mem_root, AccessPath *top_path, JOIN *top_join,
-    bool top_eligible_for_batch_mode) {
+unique_ptr_destroy_only<RowIterator>
+CreateIteratorFromAccessPath(THD *thd, MEM_ROOT *mem_root, AccessPath *top_path,
+                             JOIN *top_join, bool top_eligible_for_batch_mode) {
   assert(IteratorsAreNeeded(thd, top_path));
 
   unique_ptr_destroy_only<RowIterator> ret;
   Mem_root_array<IteratorToBeCreated> todo(mem_root);
   todo.push_back({top_path, top_join, top_eligible_for_batch_mode, &ret, {}});
-  int num_vectorized_ops_left = NUM_VECTORIZED_OPS;
+  int num_vectorized_ops_left =
+      static_cast<int>(vipersql::GetSemanticProfile().max_vectorized_ops);
 
   // The access path trees can be pretty deep, and the stack frames can be big
   // on certain compilers/setups, so instead of explicit recursion, we push jobs
@@ -755,17 +759,16 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
       }
       case AccessPath::HASH_JOIN: {
         auto &param = path->hash_join();
-        double estimated_build_rows = param.inner->num_output_rows();
-        double estimated_probe_rows = param.outer->num_output_rows();
-        if (estimated_build_rows > 0 && estimated_probe_rows > 0 && estimated_probe_rows < estimated_build_rows) {
-          std::swap(param.inner, param.outer);
-          std::swap(estimated_build_rows, estimated_probe_rows);
-        }
-        bool use_gpu_hash_join = (estimated_build_rows * estimated_probe_rows) > 1e6;
-        if (param.inner->num_output_rows() < 0.0) {
-          // Not all access paths may propagate their costs properly.
-          // Choose a fairly safe estimate (it's better to be too large
-          // than too small).
+        const double optimizer_estimated_build_rows =
+            param.inner->num_output_rows();
+        double estimated_build_rows = optimizer_estimated_build_rows;
+        // The optimizer owns hash-join orientation. Swapping children here
+        // invalidates its cost and ordering decisions and, for non-inner
+        // joins, changes which side is preserved even when the GPU path is not
+        // selected.
+        if (!std::isfinite(optimizer_estimated_build_rows) ||
+            optimizer_estimated_build_rows < 0.0) {
+          // Use a conservative estimate when cardinality is unavailable.
           estimated_build_rows = 1048576.0;
         }
         if (job.children.is_null()) {
@@ -802,33 +805,20 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
           default:
             assert(false);
         }
-        // See if we can allow the hash table to keep its contents across Init()
-        // calls.
-        //
-        // The old optimizer will sometimes push join conditions referring
-        // to outer tables (in the same query block) down in under the hash
-        // operation, so without analysis of each filter and join condition, we
-        // cannot say for sure, and thus have to turn it off. But the hypergraph
-        // optimizer sets parameter_tables properly, so we're safe if we just
-        // check that.
-        //
-        // Regardless of optimizer, we can push outer references down in under
-        // the hash, but join->hash_table_generation will increase whenever we
-        // need to recompute the query block (in JOIN::clear_hash_tables()).
-        //
-        // TODO(sgunders): The old optimizer had a concept of _when_ to clear
-        // derived tables (invalidators), and this is somehow similar. If it
-        // becomes a performance issue, consider reintroducing them.
-        //
-        // TODO(sgunders): Should this perhaps be set as a flag on the access
-        // path instead of being computed here? We do make the same checks in
-        // the cost model, so perhaps it should set the flag as well.
+        const bool use_gpu_hash_join =
+            num_vectorized_ops_left > 0 && join_type == JoinType::INNER &&
+            conditions.size() == 1 &&
+            GPUHashJoinIterator::HasSufficientHostMemoryBudget(
+                thd->variables.join_buff_size);
+        // Native hash-table reuse is safe only for a parameter-free
+        // hypergraph path. The generation changes when the query block must be
+        // rebuilt.
         uint64_t *hash_table_generation =
             (thd->lex->using_hypergraph_optimizer &&
              path->parameter_tables == 0)
                 ? &join->hash_table_generation
                 : nullptr;
-        if (use_gpu_hash_join && (conditions.empty() || num_vectorized_ops_left <= 0)) {
+        if (!use_gpu_hash_join) {
           iterator = NewIterator<HashJoinIterator>(
               thd, mem_root, std::move(job.children[1]),
               GetUsedTables(param.inner, /*include_pruned_tables=*/true),
@@ -838,18 +828,18 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
               thd->variables.join_buff_size, std::move(conditions),
               param.allow_spill_to_disk, join_type,
               join_predicate->expr->join_conditions, probe_input_batch_mode,
-            hash_table_generation);
+              hash_table_generation);
         } else {
           iterator = NewIterator<GPUHashJoinIterator>(
-            thd, mem_root, std::move(job.children[1]),
-            GetUsedTables(param.inner, /*include_pruned_tables=*/true),
-            estimated_build_rows, std::move(job.children[0]),
-            GetUsedTables(param.outer, /*include_pruned_tables=*/true),
-            param.store_rowids, param.tables_to_get_rowid_for,
-            thd->variables.join_buff_size, std::move(conditions),
-            param.allow_spill_to_disk, join_type,
-            join_predicate->expr->join_conditions, probe_input_batch_mode,
-            hash_table_generation);
+              thd, mem_root, std::move(job.children[1]),
+              GetUsedTables(param.inner, /*include_pruned_tables=*/true),
+              estimated_build_rows, std::move(job.children[0]),
+              GetUsedTables(param.outer, /*include_pruned_tables=*/true),
+              param.store_rowids, param.tables_to_get_rowid_for,
+              thd->variables.join_buff_size, std::move(conditions),
+              param.allow_spill_to_disk, join_type,
+              join_predicate->expr->join_conditions, probe_input_batch_mode,
+              hash_table_generation);
 
           --num_vectorized_ops_left;
         }
@@ -866,74 +856,106 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
           return nullptr;
         }
 
-        std::vector<Item*> sem_filters;
-        std::vector<Item*> normal_filters;
+        std::vector<Item *> semantic_filters;
+        std::vector<Item *> ordinary_filters;
 
-        // Recursive lambda to safely flatten nested AND blocks
-        auto extract_filters = [](auto& self, Item* cond, std::vector<Item*>& sem_out, std::vector<Item*>& norm_out) -> void {
-            if (!cond) return;
-            if (cond->type() == Item::COND_ITEM && 
-                down_cast<Item_cond*>(cond)->functype() == Item_func::COND_AND_FUNC) {
-                List_iterator<Item> it(*down_cast<Item_cond*>(cond)->argument_list());
-                Item* arg;
-                while ((arg = it++)) {
-                    self(self, arg, sem_out, norm_out);
-                }
-            } else {
-                if (Item* sem = find_semantic_func(cond)) {
-                    sem_out.push_back(sem);
-                } else {
-                    norm_out.push_back(cond);
-                }
+        // Only direct semantic-filter conjuncts can use the vectorized
+        // executor without changing expression semantics.
+        auto collect_filters =
+            [](auto &self, Item *condition,
+               std::vector<Item *> &semantic_output,
+               std::vector<Item *> &ordinary_output) -> bool {
+          if (!condition)
+            return false;
+          if (condition->type() == Item::COND_ITEM &&
+              down_cast<Item_cond *>(condition)->functype() ==
+                  Item_func::COND_AND_FUNC) {
+            List_iterator<Item> it(
+                *down_cast<Item_cond *>(condition)->argument_list());
+            Item *arg;
+            while ((arg = it++)) {
+              if (self(self, arg, semantic_output, ordinary_output)) {
+                return true;
+              }
             }
+            return false;
+          }
+
+          if (dynamic_cast<Item_func_semantic_generate *>(condition) !=
+              nullptr) {
+            my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                     "SEMANTIC_GENERATE in filter conditions");
+            return true;
+          }
+          if (dynamic_cast<Item_func_semantic_filter *>(condition) != nullptr) {
+            semantic_output.push_back(condition);
+            return false;
+          }
+          if (find_semantic_func(condition) != nullptr) {
+            my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                     "semantic functions nested in filter expressions");
+            return true;
+          }
+          if (ItemHasSemJoin(condition)) {
+            my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                     "SEM_JOIN outside a direct join predicate");
+            return true;
+          }
+          ordinary_output.push_back(condition);
+          return false;
         };
 
-        extract_filters(extract_filters, param.condition, sem_filters, normal_filters);
-
-        unique_ptr_destroy_only<RowIterator> current_iterator = std::move(job.children[0]);
-
-        if (!sem_filters.empty()) {
-            ha_rows num_rows_estimate = param.child->num_output_rows() < 0.0
-                                            ? HA_POS_ERROR
-                                            : lrint(param.child->num_output_rows());
-            Prealloced_array<TABLE*, 4> tables =
-                GetUsedTables(param.child, /*include_pruned_tables=*/true);
-
-            Item* merged_sem_cond = nullptr;
-            if (sem_filters.size() == 1) {
-                merged_sem_cond = sem_filters[0];
-            } else {
-                List<Item> list_arg;
-                for (Item* item : sem_filters) {
-                    list_arg.push_back(item);
-                }
-                merged_sem_cond = new (mem_root) Item_cond_and(list_arg);
-                merged_sem_cond->quick_fix_field();
-                merged_sem_cond->update_used_tables();
-            }
-
-            current_iterator = NewIterator<VectorizedFilterIterator>(
-                thd, mem_root, std::move(current_iterator),
-                TableCollection(tables, /*store_rowids=*/false,
-                                /*tables_to_get_rowid_for=*/0,
-                                GetNullableEqRefTables(param.child)),
-                merged_sem_cond, num_rows_estimate);
+        if (collect_filters(collect_filters, param.condition, semantic_filters,
+                            ordinary_filters)) {
+          return nullptr;
         }
 
-        if (!normal_filters.empty()) {
-            Item* remaining_cond = nullptr;
-            if (normal_filters.size() == 1) {
-                remaining_cond = normal_filters[0];
-            } else {
-                List<Item> list_arg;
-                for (Item* item : normal_filters) {
-                    list_arg.push_back(item);
-                }
-                remaining_cond = new (mem_root) Item_cond_and(list_arg);
-            }
+        unique_ptr_destroy_only<RowIterator> current_iterator =
+            std::move(job.children[0]);
 
-            current_iterator = NewIterator<FilterIterator>(
-                thd, mem_root, std::move(current_iterator), remaining_cond);
+        if (!semantic_filters.empty()) {
+          ha_rows num_rows_estimate =
+              param.child->num_output_rows() < 0.0
+                  ? HA_POS_ERROR
+                  : lrint(param.child->num_output_rows());
+          Prealloced_array<TABLE *, 4> tables =
+              GetUsedTables(param.child, /*include_pruned_tables=*/true);
+
+          Item *merged_sem_cond = nullptr;
+          if (semantic_filters.size() == 1) {
+            merged_sem_cond = semantic_filters[0];
+          } else {
+            List<Item> list_arg;
+            for (Item *item : semantic_filters) {
+              list_arg.push_back(item);
+            }
+            merged_sem_cond = new (mem_root) Item_cond_and(list_arg);
+            merged_sem_cond->quick_fix_field();
+            merged_sem_cond->update_used_tables();
+          }
+
+          current_iterator = NewIterator<VectorizedFilterIterator>(
+              thd, mem_root, std::move(current_iterator),
+              TableCollection(tables, /*store_rowids=*/false,
+                              /*tables_to_get_rowid_for=*/0,
+                              GetNullableEqRefTables(param.child)),
+              merged_sem_cond, num_rows_estimate);
+        }
+
+        if (!ordinary_filters.empty()) {
+          Item *remaining_cond = nullptr;
+          if (ordinary_filters.size() == 1) {
+            remaining_cond = ordinary_filters[0];
+          } else {
+            List<Item> list_arg;
+            for (Item *item : ordinary_filters) {
+              list_arg.push_back(item);
+            }
+            remaining_cond = new (mem_root) Item_cond_and(list_arg);
+          }
+
+          current_iterator = NewIterator<FilterIterator>(
+              thd, mem_root, std::move(current_iterator), remaining_cond);
         }
 
         iterator = std::move(current_iterator);
@@ -1282,85 +1304,49 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
       case AccessPath::SEM_EMB_JOIN: {
         auto &param = path->sem_join();
 
-        // 1) 估算行数并尽量把更小的一侧作为 build
-        double estimated_build_rows = param.inner->num_output_rows();
-        double estimated_probe_rows = param.outer->num_output_rows();
-        if (estimated_build_rows > 0 && estimated_probe_rows > 0 &&
-            estimated_probe_rows < estimated_build_rows) {
+        // Build the semantic index on the smaller input when both estimates
+        // are available.
+        if (param.inner->num_output_rows() > 0.0 &&
+            param.outer->num_output_rows() > 0.0 &&
+            param.outer->num_output_rows() < param.inner->num_output_rows()) {
           std::swap(param.inner, param.outer);
-          std::swap(estimated_build_rows, estimated_probe_rows);
         }
-        if (param.inner->num_output_rows() < 0.0) {
-          // 没有有效估计，给一个偏安全的默认值
-          estimated_build_rows = 1048576.0;
-        }
-      
-        // 2) 先生成子任务
+
         if (job.children.is_null()) {
           SetupJobsForChildren(mem_root, param.outer, param.inner, join,
-                               /*inner_eligible_for_batch_mode=*/true,
-                               &job, &todo);
+                               /*inner_eligible_for_batch_mode=*/true, &job,
+                               &todo);
           continue;
         }
-      
-        // 3) 处理条件并提取 prompt
+
         const JoinPredicate *join_predicate = param.join_predicate;
-        std::vector<Item_func_sem_join*> sem_conditions;
-        std::string prompt;
+        std::vector<Item_func_sem_join *> sem_conditions;
 
         if (join_predicate != nullptr) {
           for (Item *cond : join_predicate->expr->join_conditions) {
-              // Dynamic cast to find our specific function
-              auto* sem_func = dynamic_cast<Item_func_sem_join*>(cond);
-              if (sem_func != nullptr) {
-                sem_conditions.push_back(sem_func);
-              }
+            auto *sem_func = dynamic_cast<Item_func_sem_join *>(cond);
+            if (sem_func != nullptr) {
+              sem_conditions.push_back(sem_func);
+            }
           }
         }
-      
-        // 4) 批模式判断
+
         const bool probe_input_batch_mode =
             eligible_for_batch_mode && ShouldEnableBatchMode(param.outer);
-      
-        // 5) 默认全部按内连接（你要求的）
-        JoinType join_type = JoinType::INNER;
-      
-        // 6) hash_table_generation（跟 hash join 同样的逻辑，允许跨 Init() 复用）
-        uint64_t *hash_table_generation =
-            (thd->lex->using_hypergraph_optimizer && path->parameter_tables == 0)
-                ? &join->hash_table_generation
-                : nullptr;
-      
-        // 7) 表集合
-        Prealloced_array<TABLE*, 4> build_tables =
+
+        Prealloced_array<TABLE *, 4> build_tables =
             GetUsedTables(param.inner, /*include_pruned_tables=*/true);
-        Prealloced_array<TABLE*, 4> probe_tables =
+        Prealloced_array<TABLE *, 4> probe_tables =
             GetUsedTables(param.outer, /*include_pruned_tables=*/true);
-      
-        // 8) 内存上限
         const size_t max_mem = thd->variables.join_buff_size;
 
-        // 9) 创建语义 Join 迭代器
         iterator = NewIterator<SemJoinIterator>(
-            thd, mem_root,
-            /* build_input  */ std::move(job.children[1]),
-            /* build_tables */ build_tables,
-            /* est_build    */ estimated_build_rows,
-            /* probe_input  */ std::move(job.children[0]),
-            /* probe_tables */ probe_tables,
-            /* store_rowids */ param.store_rowids,
-            /* tables_to_get_rowid_for */ param.tables_to_get_rowid_for,
-            /* max_memory_available   */ max_mem,
-            /* sem_conditions        */ sem_conditions,
-            /* allow_spill_to_disk    */ param.allow_spill_to_disk,
-            /* join_type              */ join_type,
-            /* probe_input_batch_mode */ probe_input_batch_mode,
-            /* hash_table_generation  */ hash_table_generation,
-            /* impl_type              */ path->type);
+            thd, mem_root, std::move(job.children[1]), build_tables,
+            std::move(job.children[0]), probe_tables, param.store_rowids,
+            param.tables_to_get_rowid_for, max_mem, sem_conditions,
+            probe_input_batch_mode, path->type);
         break;
       }
-
-
     }
 
     if (iterator == nullptr) {
@@ -1378,7 +1364,8 @@ void FindTablesToGetRowidFor(AccessPath *path) {
 
   auto add_tables_handled_by_others = [path, &handled_by_others](
                                           AccessPath *subpath, const JOIN *) {
-    if (path == subpath) return false;  // Skip ourselves.
+    if (path == subpath)
+      return false;  // Skip ourselves.
     switch (subpath->type) {
       case AccessPath::HASH_JOIN:
         handled_by_others |=
@@ -1469,13 +1456,16 @@ static void MoveFilterPredicatesIntoHashJoinCondition(
   MutableOverflowBitset moved_predicates(thd->mem_root, predicates.size());
 
   for (int filter_idx : BitsSetIn(path->filter_predicates)) {
-    if (filter_idx >= num_where_predicates) break;
+    if (filter_idx >= num_where_predicates)
+      break;
     const Predicate &predicate = predicates[filter_idx];
-    if (!predicate.was_join_condition) continue;
+    if (!predicate.was_join_condition)
+      continue;
 
     Item *condition = predicate.condition;
     // Conditions with subqueries are not moved.
-    if (condition->has_subquery()) continue;
+    if (condition->has_subquery())
+      continue;
     moved_predicates.SetBit(filter_idx);
     if (condition->type() == Item::FUNC_ITEM &&
         down_cast<Item_func *>(condition)
@@ -1522,7 +1512,8 @@ Item *ConditionFromFilterPredicates(const Mem_root_array<Predicate> &predicates,
                                     int num_where_predicates) {
   List<Item> items;
   for (int pred_idx : BitsSetIn(mask)) {
-    if (pred_idx >= num_where_predicates) break;
+    if (pred_idx >= num_where_predicates)
+      break;
     items.push_back(predicates[pred_idx].condition);
   }
   return CreateConjunction(&items);

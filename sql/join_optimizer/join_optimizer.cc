@@ -63,7 +63,6 @@
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
-#include "sql/item_func_semantic.h"  
 #include "sql/item_sum.h"
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/bit_utils.h"
@@ -121,9 +120,6 @@
 #include "sql/uniques.h"
 #include "sql/window.h"
 #include "template_utils.h"
-
-#include "sql/iterators/external_helper_interface.h"
-
 
 using hypergraph::Hyperedge;
 using hypergraph::Node;
@@ -218,63 +214,6 @@ class CostingReceiver {
   }
 
   bool FoundSingleNode(int node_idx);
-
-  static bool EdgeHasSemJoin(const JoinPredicate *edge, NodeMap left, NodeMap right, const JoinHypergraph *graph) {
-    table_map edge_tables = 0;
-    table_map left_tables = 0;
-    table_map right_tables = 0;
-
-    // Calculate the physical tables available on the left and right sides of this join edge
-    for (size_t i : BitsSetIn(left)) left_tables |= graph->nodes[i].table->pos_in_table_list->map();
-    for (size_t i : BitsSetIn(right)) right_tables |= graph->nodes[i].table->pos_in_table_list->map();
-    edge_tables = left_tables | right_tables;
-
-    auto is_valid_sem_join = [&](Item *cond) {
-      Item_func *f = nullptr;
-      if (dynamic_cast<Item_func_sem_join *>(cond) != nullptr) {
-        f = down_cast<Item_func *>(cond);
-      } else if (cond->type() == Item::FUNC_ITEM) {
-        Item_func *temp_f = down_cast<Item_func *>(cond);
-        if (my_strcasecmp(system_charset_info, temp_f->func_name(), "sem_join") == 0) {
-          f = temp_f;
-        }
-      }
-
-      if (f != nullptr) {
-        // Calculate tables actually required by the SEM_JOIN
-        table_map needed_tables = f->used_tables();
-        if (needed_tables == 0) {
-          // Fallback: Manually extract used_tables from arguments if the function returns 0
-          for (uint j = 1; j < f->argument_count(); ++j) {
-            needed_tables |= f->arguments()[j]->used_tables();
-          }
-        }
-
-        // 1. All required tables MUST be available at this join edge
-        if ((needed_tables & ~edge_tables) == 0 && needed_tables != 0) {
-          // 2. The condition MUST cross the join boundary (one table from left, one from right)
-          // This ensures the Semantic Join is placed exactly where the two tables meet.
-          if ((needed_tables & left_tables) != 0 && (needed_tables & right_tables) != 0) {
-            return true;
-          }
-        }
-      }
-      return false;
-    };
-
-    // Check conditions attached to this specific edge
-    for (Item *cond : edge->expr->join_conditions) {
-      if (is_valid_sem_join(cond)) return true;
-    }
-
-    // Also check global WHERE predicates in case the optimizer didn't push it down
-    for (size_t i = 0; i < graph->num_where_predicates; ++i) {
-      if (is_valid_sem_join(graph->predicates[i].condition)) return true;
-    }
-
-    return false;
-  }
-
 
   // Called EmitCsgCmp() in the DPhyp paper.
   bool FoundSubgraphPair(NodeMap left, NodeMap right, int edge_idx);
@@ -598,10 +537,6 @@ class CostingReceiver {
                        FunctionalDependencySet new_fd_set,
                        OrderingSet new_obsolete_orderings,
                        bool rewrite_semi_to_inner, bool *wrote_trace);
-  void ProposeSemanticJoin(NodeMap left, NodeMap right, AccessPath *left_path,
-                       AccessPath *right_path, const JoinPredicate *edge,
-                       FunctionalDependencySet new_fd_set,
-                       OrderingSet new_obsolete_orderings, bool *wrote_trace);
   void ApplyPredicatesForBaseTable(int node_idx,
                                    OverflowBitset applied_predicates,
                                    OverflowBitset subsumed_predicates,
@@ -3121,7 +3056,6 @@ void MoveDegenerateJoinConditionToFilter(THD *thd, Query_block *query_block,
  */
 bool CostingReceiver::FoundSubgraphPair(NodeMap left, NodeMap right,
                                         int edge_idx) {
-  log_to_file("into FoundSubgraphPair");
   if (m_thd->is_error()) return true;
 
   m_graph->secondary_engine_costing_flags |=
@@ -3143,7 +3077,6 @@ bool CostingReceiver::FoundSubgraphPair(NodeMap left, NodeMap right,
     return false;
   }
 
-  bool is_sem_join_edge = EdgeHasSemJoin(edge, left, right, m_graph);
   bool is_commutative = OperatorIsCommutative(*edge->expr);
 
   // If we have an equi-semijoin, and the inner side is deduplicated
@@ -3255,19 +3188,6 @@ bool CostingReceiver::FoundSubgraphPair(NodeMap left, NodeMap right,
       // Finally, if either of the sides are parameterized on something
       // external, flipping the order will not necessarily be allowed (and would
       // cause us to not give a hash join for these tables at all).
-      if (is_sem_join_edge) {
-        ProposeSemanticJoin(left, right, left_path, right_path, edge,
-                            new_fd_set, new_obsolete_orderings, &wrote_trace);
-        
-        // 试试反向（right, left）
-        // if (is_commutative) {
-        //   ProposeSemanticJoin(right, left, right_path, left_path, edge,
-        //                       new_fd_set, new_obsolete_orderings, &wrote_trace);
-        // }
-        m_overflow_bitset_mem_root.ClearForReuse();
-        continue;
-      }
-
       if (is_commutative &&
           !Overlaps(left_path->parameter_tables | right_path->parameter_tables,
                     RAND_TABLE_BIT)) {
@@ -3637,103 +3557,6 @@ void CostingReceiver::ProposeHashJoin(
     }
   }
 }
-
-void CostingReceiver::ProposeSemanticJoin(
-    NodeMap left, NodeMap right, AccessPath *left_path, AccessPath *right_path,
-    const JoinPredicate *edge, FunctionalDependencySet new_fd_set,
-    OrderingSet new_obsolete_orderings, bool *wrote_trace) {
-  // 1. 基本合法性：带参数化的 join 交给 NLJ 处理
-  if (Overlaps(left_path->parameter_tables, right) ||
-      Overlaps(right_path->parameter_tables, left | RAND_TABLE_BIT)) {
-    return;
-  }
-
-  assert(BitsetsAreCommitted(left_path));
-  assert(BitsetsAreCommitted(right_path));
-
-  // 2. 构造语义 JOIN 的 AccessPath
-  AccessPath join_path;
-  join_path.type = AccessPath::SEM_LLM_JOIN;
-
-  // 参数依赖：只保留来自 join 子图之外的参数
-  join_path.parameter_tables =
-      (left_path->parameter_tables | right_path->parameter_tables) &
-      ~(left | right);
-
-  // TODO: 这里根据自己的结构修改字段名
-  join_path.type = AccessPath::SEM_LLM_JOIN;
-  join_path.sem_join().outer = left_path;
-  join_path.sem_join().inner = right_path;
-  join_path.sem_join().join_predicate = edge;
-  join_path.sem_join().impl_type = AccessPath::SEM_LLM_JOIN;
-
-
-  // 3. 粗略估计输出行数
-  double right_path_already_applied_selectivity =
-      FindAlreadyAppliedSelectivity(edge, left_path, right_path, left, right);
-  if (right_path_already_applied_selectivity < 0.0) {
-    return;
-  }
-
-  double outer_input_rows = left_path->num_output_rows();
-  double inner_input_rows =
-      right_path->num_output_rows() / right_path_already_applied_selectivity;
-
-  // 这里直接复用现有的行数估计逻辑（按普通 inner join 估）
-  double num_output_rows =
-      FindOutputRowsForJoin(outer_input_rows, inner_input_rows, edge);
-
-  join_path.num_output_rows_before_filter = num_output_rows;
-
-  // 4. 估计成本（非常粗略）
-  const double semantic_cost =
-      num_output_rows * kApplyOneFilterCost;  // 占个位，不至于 0
-  double cost = left_path->cost + right_path->cost + semantic_cost;
-
-  join_path.cost_before_filter = cost;
-  join_path.set_num_output_rows(num_output_rows);
-  join_path.init_cost =
-      left_path->init_cost + right_path->init_cost;       // 一次执行的初始化
-  join_path.init_once_cost =
-      left_path->init_once_cost + right_path->init_once_cost; // 可复用部分
-  join_path.cost = cost;
-
-  join_path.safe_for_rowid =
-      std::max(left_path->safe_for_rowid, right_path->safe_for_rowid);
-
-  if (m_trace != nullptr && !*wrote_trace) {
-    *m_trace += PrintSubgraphHeader(edge, join_path, left, right);
-    *m_trace += "  (semantic join candidate)\n";
-    *wrote_trace = true;
-  }
-
-  for (bool materialize_subqueries : {false, true}) {
-    AccessPath new_path = join_path;
-    FunctionalDependencySet filter_fd_set;
-
-    ApplyDelayedPredicatesAfterJoin(
-        left, right, left_path, right_path,
-        edge->expr->join_predicate_first,
-        edge->expr->join_predicate_last,
-        materialize_subqueries, &new_path, &filter_fd_set);
-
-    // 语义 join 不保序：直接重置 ordering_state
-    new_path.ordering_state =
-        m_orderings->ApplyFDs(m_orderings->SetOrder(0),
-                              new_fd_set | filter_fd_set);
-
-    ProposeAccessPathWithOrderings(
-        left | right, new_fd_set | filter_fd_set, new_obsolete_orderings,
-        &new_path,
-        materialize_subqueries ? "sem_join mat. subq." : "sem_join");
-
-    if (!Overlaps(new_path.filter_predicates,
-                  m_graph->materializable_predicates)) {
-      break;
-    }
-  }
-}
-
 
 // Of all delayed predicates, see which ones we can apply now, and which
 // ones that need to be delayed further.

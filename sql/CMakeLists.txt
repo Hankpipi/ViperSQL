@@ -468,6 +468,9 @@ SET(SQL_SHARED_SOURCES
   opt_costconstantcache.cc
   opt_costconstants.cc
   opt_costmodel.cc
+  semantic_plan_refiner.cc
+  semantic_batch_controller.cc
+  semantic_profile.cc
   opt_explain.cc
   opt_explain_format.cc
   opt_explain_traditional.cc
@@ -660,11 +663,9 @@ SET(SQL_SHARED_SOURCES
   daemon_proxy_keyring/daemon_proxy_keyring.cc
   )
 
-set(SQL_CUDA_SOURCES
+SET(SQL_CUDA_SOURCES
     iterators/helpers/gpu_hash_join.cc
-    iterators/helpers/gpu_agg.cc
     iterators/gpu_ops/hash_join.cu
-    iterators/gpu_ops/aggr.cu
 )
 
 IF(BUILD_IS_SINGLE_CONFIG)
@@ -1600,15 +1601,4 @@ ADD_CUSTOM_COMMAND(OUTPUT ${GITHASH_HEADER}
   VERBATIM
 )
 
-
-# Optionally set CUDA flags (e.g., architecture, optimization flags)
-# set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -O3 -arch=sm_35")
-
-# Link CUDA libraries to mysqld target
-target_link_libraries(mysqld ${CUDA_LIBRARIES})
-
-# Optionally, link other libraries like MySQL libraries (if needed)
-# target_link_libraries(mysqld ${MYSQL_LIBRARIES})
-
-# Enable CUDA for compilation (ensure CUDA source files are compiled correctly)
-# cuda_add_executable(mysqld ${SOURCE_FILES})  # Ensure CUDA files are compiled correctly with the appropriate compiler
+TARGET_LINK_LIBRARIES(mysqld ${CUDA_LIBRARIES})

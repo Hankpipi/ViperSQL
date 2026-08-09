@@ -1,73 +1,52 @@
 #ifndef SQL_ITERATORS_EXTERNAL_HELPER_INTERFACE_H_
 #define SQL_ITERATORS_EXTERNAL_HELPER_INTERFACE_H_
 
-#include <iostream>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
-#include <iomanip>
 #include <string>
-#include <chrono>
 
-// Default batch size for vectorized operators
-static constexpr int BATCH_SIZE = 50;
+// Default number of rows submitted to an external helper.
+constexpr size_t kExternalHelperBatchSize = 50;
 
-inline void log_to_file(const std::string& msg) {
-  auto now = std::chrono::system_clock::now();
-  std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-
-  std::ofstream log_file("/home/zihao/ViperSQL/debug.log", std::ios::app);
-  if (log_file.is_open()) {
-      log_file << std::ctime(&now_time) << msg << std::endl;
-      log_file.close();
-  } else {
-      std::cerr << "Unable to open log file." << std::endl;
-  }
-}
-
-// Base class interface for External Helper helpers
+// Helper operations return true on failure and false on success.
 class ExternalHelperInterface {
-public:
+ public:
   virtual ~ExternalHelperInterface() = default;
 
-  /// Initialize External Helper resources (buffers, streams, etc.)
-  /// @param capacity maximum capacity or buffer size
-  /// @return true on failure, false on success
-  virtual bool Init(size_t capacity) = 0;
+  // Initialize helper resources.
+  virtual bool Init() = 0;
 
-  /// Submit a batch of input tuples to External Helper for processing
-  /// @param host_data pointer to host input data
-  /// @param n_rows number of tuples in batch
-  /// @param stream CUDA stream for asynchronous execution
-  /// @return true on failure, false on success
-  virtual bool SubmitBatch(const void* host_data, size_t n_rows) = 0;
+  // Submit a batch of input tuples for processing.
+  virtual bool SubmitBatch(const void *host_data, size_t n_rows) = 0;
 
-  /// Fetch results from External Helper to host
-  /// @param out_buffer host buffer to copy results into
-  /// @param max_results maximum results buffer size
-  /// @param out_result_count number of results copied back
-  /// @return true on failure, false on success
-  virtual bool FetchResults(void* out_buffer, size_t* out_result_count) = 0;
+  // Fetch results into host memory.
+  virtual bool FetchResults(void *out_buffer, size_t *out_result_count) = 0;
 
-  /// Required host slots after Synchronize(). Helpers with fan-out override
-  /// this; one-to-one helpers use the submitted-row count.
+  // Required host slots after Synchronize(). Helpers with fan-out override
+  // this; one-to-one helpers use the submitted-row count.
   virtual size_t ResultBufferCapacity(size_t submitted_rows) const {
     return submitted_rows;
   }
 
-  /// Synchronize External Helper execution and streams
-  /// @return true on failure, false on success
+  // Client-observed service time for the most recently completed batch.
+  // Zero means that the helper does not expose timing. The non-pure default
+  // keeps existing ExternalHelper implementations source compatible.
+  virtual double LastBatchServiceSeconds() const { return 0.0; }
+
+  // Opaque process/configuration epoch reported by a remote helper.
+  virtual std::string LastServerEpoch() const { return {}; }
+
+  // Synchronize helper execution.
   virtual bool Synchronize() = 0;
 
-  /// Nonblocking readiness check for the single request owned by this helper.
+  // Nonblocking readiness check for the single request owned by this helper.
   virtual bool IsIdle() const = 0;
 
-  /// Release External Helper resources
+  // Release helper resources.
   virtual void Destroy() = 0;
 
-  /// @brief Set the status of the external helpers.
-  /// @param status 
-  virtual void SetStatus(const std::string& status) = 0;
+  // Set the phase of helpers that maintain build/probe state.
+  virtual void SetStatus(const std::string &) {}
 };
 
 #endif  // SQL_ITERATORS_EXTERNAL_HELPER_INTERFACE_H_

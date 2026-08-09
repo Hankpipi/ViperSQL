@@ -24,9 +24,12 @@
 #include "sql/opt_costmodel.h"
 
 #include <assert.h>
+#include <cmath>
+#include <limits>
 
 #include "sql/handler.h"
 #include "sql/opt_costconstantcache.h"  // Cost_constant_cache
+#include "sql/semantic_profile.h"
 #include "sql/table.h"                  // TABLE
 
 extern Cost_constant_cache *cost_constant_cache;  // defined in
@@ -55,6 +58,51 @@ void Cost_model_server::init() {
     m_initialized = true;
 #endif
   }
+}
+
+double Cost_model_server::row_semantic_evaluate_cost(double rows) const {
+  assert(m_initialized);
+  assert(rows >= 0.0);
+  if (rows <= 0.0) return 0.0;
+
+  const vipersql::SemanticProfile &profile = vipersql::GetSemanticProfile();
+  const double semantic_seconds = vipersql::EstimateUnarySemanticSeconds(
+      rows, profile.unary_filter.input_bytes_per_row);
+  const double native_row_cost = m_server_cost_constants->row_evaluate_cost();
+  const double native_row_seconds = profile.native_row_evaluation_seconds;
+
+  if (!std::isfinite(semantic_seconds) || !std::isfinite(native_row_cost) ||
+      native_row_cost <= 0.0 || !std::isfinite(native_row_seconds) ||
+      native_row_seconds <= 0.0) {
+    return std::numeric_limits<double>::max();
+  }
+
+  const double cost = semantic_seconds * native_row_cost / native_row_seconds;
+  return std::isfinite(cost) ? cost : std::numeric_limits<double>::max();
+}
+
+double Cost_model_server::semantic_join_evaluate_cost(double build_rows,
+                                                      double probe_rows) const {
+  assert(m_initialized);
+  assert(build_rows >= 0.0);
+  assert(probe_rows >= 0.0);
+
+  const vipersql::SemanticProfile &profile = vipersql::GetSemanticProfile();
+  const double input_bytes_per_side =
+      profile.binary_join.input_bytes_per_row / 2.0;
+  const double semantic_seconds = vipersql::EstimateBinarySemanticSeconds(
+      build_rows, input_bytes_per_side, probe_rows, input_bytes_per_side);
+  const double native_row_cost = m_server_cost_constants->row_evaluate_cost();
+  const double native_row_seconds = profile.native_row_evaluation_seconds;
+
+  if (!std::isfinite(semantic_seconds) || !std::isfinite(native_row_cost) ||
+      native_row_cost <= 0.0 || !std::isfinite(native_row_seconds) ||
+      native_row_seconds <= 0.0) {
+    return std::numeric_limits<double>::max();
+  }
+
+  const double cost = semantic_seconds * native_row_cost / native_row_seconds;
+  return std::isfinite(cost) ? cost : std::numeric_limits<double>::max();
 }
 
 void Cost_model_table::init(const Cost_model_server *cost_model_server,

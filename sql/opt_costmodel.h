@@ -97,9 +97,18 @@ class Cost_model_server {
 
     return rows * m_server_cost_constants->row_evaluate_cost();
   }
-  double row_semantic_evaluate_cost(double rows) const {
-    return 10.0 * rows;
-  }
+  /**
+    Cost of evaluating a semantic predicate for a number of rows.
+
+    The persisted initialization-time helper profile is expressed in seconds;
+    this method converts that total latency to MySQL optimizer cost units using
+    the calibrated native row-evaluation time.
+  */
+  double row_semantic_evaluate_cost(double rows) const;
+
+  /** Cost of a semantic join in MySQL optimizer cost units. */
+  double semantic_join_evaluate_cost(double build_rows,
+                                     double probe_rows) const;
 
   /**
     Cost of doing a number of key compare operations.

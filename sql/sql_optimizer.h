@@ -44,6 +44,7 @@
 #include "sql/iterators/row_iterator.h"
 #include "sql/mem_root_array.h"
 #include "sql/opt_explain_format.h"  // Explain_sort_clause
+#include "sql/semantic_plan_refiner.h"
 #include "sql/sql_executor.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
@@ -591,8 +592,11 @@ class JOIN {
   /// If true, calculate found rows for this query block
   bool calc_found_rows{false};
 
-  // True if the plan contains semantic operators, which may require special handling in the executor.
+  /// True if the plan contains semantic operators.
   bool has_semantic_operators{false};
+
+  /** Optimizer-only semantic predicate extraction, costing, and placement. */
+  std::unique_ptr<vipersql::SemanticPlanRefiner> semantic_plan_refiner;
 
   /**
     This will force tmp table to NOT use index + update for group
@@ -1273,7 +1277,4 @@ bool IteratorsAreNeeded(const THD *thd, AccessPath *root_path);
 double EstimateRowAccesses(const AccessPath *path, double num_evaluations,
                            double limit);
 
-double get_semantic_cost_for_stage(Item *condition, table_map prefix_map, 
-                                   table_map new_table_map, 
-                                   const Cost_model_server *cost_model);
 #endif /* SQL_OPTIMIZER_INCLUDED */
