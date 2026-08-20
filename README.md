@@ -23,16 +23,16 @@ Before building ViperSQL, ensure your environment meets the following requiremen
 
    Clone the ViperSQL repository along with its submodules:
    ```bash
-   git clone https://github.com/Hankpipi/ViperSQL.git
+   git clone --recurse-submodules https://github.com/Hankpipi/ViperSQL.git
    cd ViperSQL
-   git submodule update --init --recursive
    ```
 
 2. **Build and Install**
 
    Configure and compile the project with the recommended settings:
    ```bash
-   cmake . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_SSL=system -DWITH_ZLIB=bundled -DWITH_ZSTD=bundled -DMYSQL_MAINTAINER_MODE=0 -DENABLED_LOCAL_INFILE=1 -DENABLE_DTRACE=0 -DCMAKE_CXX_FLAGS="-march=native -w" -DFORCE_INSOURCE_BUILD=1 -DDOWNLOAD_BOOST=1 -DWITH_BOOST=./boost/ -DWITH_FB_VECTORDB=1 -DCMAKE_INSTALL_PREFIX=./myrocks -DWITH_SEMANTICDB=1 -DCMAKE_EXE_LINKER_FLAGS="-Wl,--no-as-needed -lzmq"   -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--no-as-needed -lzmq"
+   python3 -m pip install -e 'semantic_operator_runtime[remote]'
+   cmake . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_SSL=system -DWITH_ZLIB=bundled -DWITH_ZSTD=bundled -DMYSQL_MAINTAINER_MODE=0 -DENABLED_LOCAL_INFILE=1 -DENABLE_DTRACE=0 -DCMAKE_CXX_FLAGS="-march=native -w" -DFORCE_INSOURCE_BUILD=1 -DDOWNLOAD_BOOST=1 -DWITH_BOOST=./boost/ -DWITH_FB_VECTORDB=1 -DCMAKE_INSTALL_PREFIX=./myrocks -DWITH_SEMANTICDB=1
 
    make -j 8
    ```
@@ -56,7 +56,17 @@ Before building ViperSQL, ensure your environment meets the following requiremen
 
    myisam-recover-options  = BACKUP
    log_error               = /path/to/mysql-log/error.log
+
+   # mysqld starts, health-checks, owns, and stops the bundled semantic runtime.
+   semantic-operator-runtime-autostart        = ON
+   semantic-operator-runtime-startup-timeout = 15
    ```
+
+   The runtime uses `tcp://127.0.0.1:5555` by default. Set
+   `VIPERSQL_SEMANTIC_HELPER_ENDPOINT` in the `mysqld` environment to select an
+   isolated supported endpoint such as `tcp://127.0.0.1:5556`. Advanced
+   deployments can override the packaged runtime or Python interpreter with
+   `semantic-operator-runtime-root` and `semantic-operator-runtime-python`.
 
 2. **Initialize the Data Directory**
 
@@ -111,4 +121,3 @@ WHERE SEM_JOIN( 'Is {poi.content} relevant to {topic.topic}?', poi.content, topi
 ## 📈 Evaluation
 
 Detailed instructions on datasets and benchmarking procedures can be found in the [Benchmark Directory](./benchmark/README.md).
-

@@ -963,6 +963,41 @@ IF(HAVE_NO_BUILTIN_MEMCMP)
   )
 ENDIF()
 
+OPTION(WITH_SEMANTIC_OPERATOR_RUNTIME
+  "Start and stop the semantic operator runtime with mysqld" ON)
+
+IF(WITH_SEMANTIC_OPERATOR_RUNTIME)
+  SET(SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR
+    "${CMAKE_SOURCE_DIR}/semantic_operator_runtime")
+  IF(NOT EXISTS "${SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR}/pyproject.toml")
+    MESSAGE(FATAL_ERROR
+      "semantic-operator-runtime is missing. Run "
+      "'git submodule update --init --recursive' before configuring ViperSQL.")
+  ENDIF()
+
+  FIND_PROGRAM(SEMANTIC_OPERATOR_RUNTIME_PYTHON_EXECUTABLE
+    NAMES python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3
+    HINTS
+      "$ENV{VIRTUAL_ENV}/bin"
+      "$ENV{CONDA_PREFIX}/bin"
+      "$ENV{HOME}/miniconda3/bin"
+    DOC "Python interpreter used by the semantic operator runtime")
+  IF(NOT SEMANTIC_OPERATOR_RUNTIME_PYTHON_EXECUTABLE)
+    MESSAGE(FATAL_ERROR "A Python 3 interpreter is required by semantic-operator-runtime")
+  ENDIF()
+  EXECUTE_PROCESS(
+    COMMAND "${SEMANTIC_OPERATOR_RUNTIME_PYTHON_EXECUTABLE}" -c "import zmq"
+    RESULT_VARIABLE SEMANTIC_OPERATOR_RUNTIME_PYZMQ_RESULT
+    OUTPUT_QUIET ERROR_QUIET)
+  IF(NOT SEMANTIC_OPERATOR_RUNTIME_PYZMQ_RESULT EQUAL 0)
+    MESSAGE(FATAL_ERROR
+      "${SEMANTIC_OPERATOR_RUNTIME_PYTHON_EXECUTABLE} cannot import pyzmq. "
+      "Install semantic-operator-runtime before building ViperSQL.")
+  ENDIF()
+
+  LIST(APPEND SQL_SOURCE semantic_operator_runtime_process.cc)
+ENDIF()
+
 
 ADD_LIBRARY(sql_main STATIC ${SQL_SOURCE})
 ADD_DEPENDENCIES(sql_main GenServerSource)
@@ -972,6 +1007,18 @@ ADD_DEPENDENCIES(sql_main GenSysSchema)
 TARGET_LINK_LIBRARIES(sql_main ${MYSQLD_STATIC_PLUGIN_LIBS}
   mysql_server_component_services mysys strings vio
   binlogevents_static ${LIBWRAP} ${LIBDL} ${SSL_LIBRARIES} ${LIBCAP})
+
+IF(WITH_SEMANTIC_OPERATOR_RUNTIME)
+  SET(SEMANTIC_OPERATOR_RUNTIME_BUILD_ROOT
+    "${CMAKE_BINARY_DIR}/runtime/semantic_operator_runtime")
+  FIND_LIBRARY(SEMANTIC_OPERATOR_RUNTIME_ZMQ_LIBRARY
+    NAMES zmq REQUIRED)
+  TARGET_COMPILE_DEFINITIONS(sql_main PRIVATE
+    HAVE_SEMANTIC_OPERATOR_RUNTIME
+    SEMANTIC_OPERATOR_RUNTIME_DEFAULT_PYTHON="${SEMANTIC_OPERATOR_RUNTIME_PYTHON_EXECUTABLE}"
+    SEMANTIC_OPERATOR_RUNTIME_DEFAULT_ROOT="${SEMANTIC_OPERATOR_RUNTIME_BUILD_ROOT}")
+  TARGET_LINK_LIBRARIES(sql_main ${SEMANTIC_OPERATOR_RUNTIME_ZMQ_LIBRARY})
+ENDIF()
 
 # sql/immutable_string.h uses
 # google::protobuf::io::CodedOutputStream::WriteVarint64ToArray
@@ -1241,6 +1288,28 @@ LIST(APPEND MYSQLD_SOURCE partitioning/partition_base.cc)
 MYSQL_ADD_EXECUTABLE(mysqld
   ${MYSQLD_SOURCE} DESTINATION ${INSTALL_SBINDIR} COMPONENT Server
   )
+
+IF(WITH_SEMANTIC_OPERATOR_RUNTIME)
+  ADD_CUSTOM_COMMAND(TARGET mysqld POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+      "${SEMANTIC_OPERATOR_RUNTIME_BUILD_ROOT}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+      "${SEMANTIC_OPERATOR_RUNTIME_BUILD_ROOT}"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR}/operators"
+      "${SEMANTIC_OPERATOR_RUNTIME_BUILD_ROOT}/operators"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR}/__init__.py"
+      "${SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR}/__main__.py"
+      "${SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR}/cli.py"
+      "${SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR}/config.py"
+      "${SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR}/protocol.py"
+      "${SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR}/server.py"
+      "${SEMANTIC_OPERATOR_RUNTIME_SOURCE_DIR}/version.py"
+      "${SEMANTIC_OPERATOR_RUNTIME_BUILD_ROOT}"
+    COMMENT "Packaging semantic-operator-runtime for mysqld"
+    VERBATIM)
+ENDIF()
 
 # We depend on protobuf because of the mysqlx plugin and replication.
 IF(UNIX_INSTALL_RPATH_ORIGIN_PRIV_LIBDIR)

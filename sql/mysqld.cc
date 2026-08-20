@@ -794,6 +794,10 @@ MySQL clients support the protocol:
 #include "sql/item_cmpfunc.h"  // Arg_comparator
 #include "sql/item_create.h"
 #include "sql/item_func.h"
+#ifdef HAVE_SEMANTIC_OPERATOR_RUNTIME
+#include "sql/iterators/helpers/semantic_helper_endpoint.h"
+#include "sql/semantic_operator_runtime_process.h"
+#endif
 #include "sql/item_strfunc.h"  // Item_func_uuid
 #include "sql/keycaches.h"     // get_or_create_key_cache
 #include "sql/log.h"
@@ -1162,6 +1166,12 @@ bool opt_debugging = false;
 static bool opt_external_locking = false, opt_console = false;
 static bool opt_short_log_format = false;
 static char *mysqld_user, *mysqld_chroot;
+#ifdef HAVE_SEMANTIC_OPERATOR_RUNTIME
+static bool opt_semantic_operator_runtime_autostart = true;
+static char *opt_semantic_operator_runtime_python = nullptr;
+static char *opt_semantic_operator_runtime_root = nullptr;
+static ulong opt_semantic_operator_runtime_startup_timeout = 15;
+#endif
 static const char *default_character_set_name;
 static const char *character_set_filesystem_name;
 static const char *lc_messages;
@@ -3039,6 +3049,10 @@ static void free_connection_acceptors() {
 static void clean_up(bool print_message) {
   DBUG_PRINT("exit", ("clean_up"));
   if (cleanup_done++) return; /* purecov: inspected */
+
+#ifdef HAVE_SEMANTIC_OPERATOR_RUNTIME
+  semantic_operator_runtime::stop();
+#endif
 
   ha_pre_dd_shutdown();
   dd::shutdown();
@@ -9428,6 +9442,32 @@ int mysqld_main(int argc, char **argv)
   }
 #endif
 
+#ifdef HAVE_SEMANTIC_OPERATOR_RUNTIME
+  if (opt_semantic_operator_runtime_autostart && !opt_initialize &&
+      !is_help_or_validate_option()) {
+    semantic_operator_runtime::Process_options runtime_options;
+    runtime_options.python_executable =
+        opt_semantic_operator_runtime_python != nullptr
+            ? opt_semantic_operator_runtime_python
+            : SEMANTIC_OPERATOR_RUNTIME_DEFAULT_PYTHON;
+    runtime_options.runtime_root =
+        opt_semantic_operator_runtime_root != nullptr
+            ? opt_semantic_operator_runtime_root
+            : SEMANTIC_OPERATOR_RUNTIME_DEFAULT_ROOT;
+    runtime_options.endpoint = semhelpers::SemanticHelperEndpoint();
+    runtime_options.startup_timeout_seconds = static_cast<unsigned int>(
+        opt_semantic_operator_runtime_startup_timeout);
+    std::string runtime_error;
+    if (!semantic_operator_runtime::start(runtime_options, &runtime_error)) {
+      sql_print_error("Could not start semantic-operator-runtime: %s",
+                      runtime_error.c_str());
+      unireg_abort(MYSQLD_ABORT_EXIT);
+    }
+    sql_print_information("semantic-operator-runtime is ready at %s",
+                          runtime_options.endpoint.c_str());
+  }
+#endif
+
   server_components_initialized();
 
   /*
@@ -10138,6 +10178,27 @@ struct my_option my_long_options[] = {
      &opt_autocommit, &opt_autocommit, nullptr, GET_BOOL, OPT_ARG, 1, 0, 0,
      &source_autocommit, /* arg_source, to be copied to Sys_var */
      0, nullptr},
+#ifdef HAVE_SEMANTIC_OPERATOR_RUNTIME
+    {"semantic-operator-runtime-autostart", 0,
+     "Start an owned semantic operator runtime during mysqld startup.",
+     &opt_semantic_operator_runtime_autostart,
+     &opt_semantic_operator_runtime_autostart, nullptr, GET_BOOL, OPT_ARG, 1, 0,
+     0, nullptr, 0, nullptr},
+    {"semantic-operator-runtime-python", 0,
+     "Python interpreter used to start semantic-operator-runtime.",
+     &opt_semantic_operator_runtime_python,
+     &opt_semantic_operator_runtime_python, nullptr, GET_STR, REQUIRED_ARG, 0,
+     0, 0, nullptr, 0, nullptr},
+    {"semantic-operator-runtime-root", 0,
+     "Packaged semantic_operator_runtime package root.",
+     &opt_semantic_operator_runtime_root, &opt_semantic_operator_runtime_root,
+     nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr, 0, nullptr},
+    {"semantic-operator-runtime-startup-timeout", 0,
+     "Seconds to wait for the semantic runtime health response.",
+     &opt_semantic_operator_runtime_startup_timeout,
+     &opt_semantic_operator_runtime_startup_timeout, nullptr, GET_ULONG,
+     REQUIRED_ARG, 15, 1, 300, nullptr, 0, nullptr},
+#endif
     {"binlog-do-db", OPT_BINLOG_DO_DB,
      "Include only updates to the specified database when writing the "
      "binary log.",

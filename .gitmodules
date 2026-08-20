@@ -4,3 +4,6 @@
 [submodule "faiss"]
 	path = faiss
 	url = https://github.com/facebookresearch/faiss.git
+[submodule "semantic_operator_runtime"]
+	path = semantic_operator_runtime
+	url = https://github.com/Hankpipi/semantic-operator-runtime.git
