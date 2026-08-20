@@ -28,6 +28,7 @@ class Item_func_semantic_filter : public Item_int_func {
 
   std::string compute_prompt();
   longlong val_int() override;
+  bool is_bool_func() const override { return true; }
   bool is_semantic_operator() const override { return true; }
   double get_semantic_cost(const Cost_model_server *cm) const override {
     return cm->row_semantic_evaluate_cost(1.0);
@@ -82,6 +83,7 @@ class Item_func_sem_join : public Item_int_func {
   const char *func_name() const override { return "sem_join"; }
   bool resolve_type(THD *thd) override;
   longlong val_int() override;
+  bool is_bool_func() const override { return true; }
   std::string prompt();
   Item *left_item() const { return args[1]; }
   Item *right_item() const { return args[2]; }
@@ -95,6 +97,14 @@ class Item_func_sem_join : public Item_int_func {
 };
 
 Item *find_semantic_func(Item *node);
+/**
+  Return the semantic filter represented by a supported top-level predicate.
+
+  In addition to the direct boolean form, accept an equality to the literal
+  integer 1 on either side. Other wrappers remain unsupported so the
+  vectorized executor never changes the surrounding expression semantics.
+*/
+Item_func_semantic_filter *AsSemanticFilterPredicate(Item *item);
 bool JoinConditionsHaveSemJoin(const std::vector<Item *> &conds);
 bool ItemHasSemJoin(Item *item);
 Item_func_sem_join *AsSemJoin(Item *item);

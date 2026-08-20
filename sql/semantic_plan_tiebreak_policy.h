@@ -1,4 +1,4 @@
-/* Copyright (c) 2026, ViperSQL contributors.
+/* Copyright (c) 2026, Zihao Yu.
 
    Pure policy helpers for robust semantic-plan tie-breaking.
 */

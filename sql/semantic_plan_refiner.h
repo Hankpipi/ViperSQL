@@ -1,4 +1,4 @@
-/* Copyright (c) 2026, ViperSQL contributors.
+/* Copyright (c) 2026, Zihao Yu.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0.

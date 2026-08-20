@@ -46,6 +46,7 @@
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
 #include "sql/item_create.h"
+#include "sql/item_func_semantic.h"
 #include "sql/item_strfunc.h"
 #include "sql/item_sum.h"
 #include "sql/item_timefunc.h"
@@ -78,6 +79,25 @@ class ItemTest : public ::testing::Test {
 
   Server_initializer initializer;
 };
+
+TEST_F(ItemTest, SemanticFilterPredicateAcceptsOnlyDirectOrEqualityToOne) {
+  auto *semantic_filter = new Item_func_semantic_filter_two_col(
+      new Item_int(0), new Item_int(0), new Item_int(0));
+
+  EXPECT_EQ(semantic_filter, AsSemanticFilterPredicate(semantic_filter));
+  EXPECT_EQ(semantic_filter,
+            AsSemanticFilterPredicate(
+                new Item_func_eq(semantic_filter, new Item_int(1))));
+  EXPECT_EQ(semantic_filter,
+            AsSemanticFilterPredicate(
+                new Item_func_eq(new Item_int(1), semantic_filter)));
+
+  EXPECT_EQ(nullptr, AsSemanticFilterPredicate(
+                         new Item_func_eq(semantic_filter, new Item_int(0))));
+  EXPECT_EQ(nullptr,
+            AsSemanticFilterPredicate(
+                new Item_func_ne(semantic_filter, new Item_int(0))));
+}
 
 /**
   This is a simple mock Field class, illustrating how to set expectations on

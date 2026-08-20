@@ -11,6 +11,7 @@
 #include <map>
 
 #include "mysqld_error.h"
+#include "sql/item_cmpfunc.h"
 #include "sql/sql_exception_handler.h"
 
 namespace {
@@ -152,6 +153,35 @@ Item *find_semantic_func(Item *node) {
     }
   }
 
+  return nullptr;
+}
+
+Item_func_semantic_filter *AsSemanticFilterPredicate(Item *item) {
+  if (auto *filter = dynamic_cast<Item_func_semantic_filter *>(item)) {
+    return filter;
+  }
+
+  auto *function = dynamic_cast<Item_func *>(item);
+  if (function == nullptr || function->functype() != Item_func::EQ_FUNC ||
+      function->argument_count() != 2) {
+    return nullptr;
+  }
+
+  Item *left = function->arguments()[0];
+  Item *right = function->arguments()[1];
+  auto is_literal_one = [](Item *candidate) {
+    const auto *integer = dynamic_cast<const Item_int *>(candidate);
+    return integer != nullptr && integer->value == 1;
+  };
+
+  if (auto *filter = dynamic_cast<Item_func_semantic_filter *>(left);
+      filter != nullptr && is_literal_one(right)) {
+    return filter;
+  }
+  if (auto *filter = dynamic_cast<Item_func_semantic_filter *>(right);
+      filter != nullptr && is_literal_one(left)) {
+    return filter;
+  }
   return nullptr;
 }
 

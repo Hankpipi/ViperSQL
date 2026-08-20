@@ -1,4 +1,4 @@
-/* Copyright (c) 2026, ViperSQL contributors.
+/* Copyright (c) 2026, Zihao Yu.
 
    Initialization-time profiling and persistent semantic cost parameters.
 */
@@ -29,6 +29,7 @@
 #include "my_io.h"
 #include "my_sys.h"
 #include "sql/log.h"
+#include "sql/iterators/helpers/semantic_helper_endpoint.h"
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -257,7 +258,6 @@ bool PersistProfile(const std::string &path,
   return true;
 }
 
-constexpr char kProfileEndpoint[] = "tcp://127.0.0.1:5555";
 constexpr char kProfilePredicate[] = "The statement is true.";
 
 /**
@@ -314,7 +314,7 @@ class ProfileRpcClient {
     m_socket->setsockopt(ZMQ_RCVTIMEO, m_receive_timeout_ms);
     m_socket->setsockopt(ZMQ_SNDTIMEO, m_send_timeout_ms);
     m_socket->setsockopt(ZMQ_LINGER, 0);
-    m_socket->connect(kProfileEndpoint);
+    m_socket->connect(semhelpers::SemanticHelperEndpoint());
   }
 
   void ResetSocket() { m_socket.reset(); }

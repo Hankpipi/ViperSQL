@@ -887,8 +887,10 @@ CreateIteratorFromAccessPath(THD *thd, MEM_ROOT *mem_root, AccessPath *top_path,
                      "SEMANTIC_GENERATE in filter conditions");
             return true;
           }
-          if (dynamic_cast<Item_func_semantic_filter *>(condition) != nullptr) {
-            semantic_output.push_back(condition);
+          if (Item_func_semantic_filter *semantic_filter =
+                  AsSemanticFilterPredicate(condition);
+              semantic_filter != nullptr) {
+            semantic_output.push_back(semantic_filter);
             return false;
           }
           if (find_semantic_func(condition) != nullptr) {

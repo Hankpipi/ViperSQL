@@ -3,7 +3,22 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "sql/iterators/helpers/semantic_helper_endpoint.h"
+
 namespace semhelpers {
+namespace {
+
+// Resolve before serving queries and keep every thread on one immutable
+// endpoint.  An invalid explicit selector terminates startup instead of
+// silently falling back to the production helper.
+const std::string &g_semantic_helper_endpoint_at_startup =
+    SemanticHelperEndpoint();
+
+const std::string &StartupSemanticHelperEndpoint() {
+    return g_semantic_helper_endpoint_at_startup;
+}
+
+}  // namespace
 
 std::string zmq_rpc_call(const std::string& endpoint,
                          const std::string& request_json,
@@ -36,14 +51,14 @@ nlohmann::json semantic_task_zmq_rpc_call(const std::string& name,
                                           const std::vector<std::string>& values,
                                           const std::string& param_key,
                                           const std::string& param_value) {
-    const std::string endpoint = "tcp://127.0.0.1:5555";
     nlohmann::json request_json;
     request_json["name"] = name;
     request_json["values"] = values;
     request_json[param_key] = param_value;
 
     try {
-        std::string response_str = zmq_rpc_call(endpoint, request_json.dump());
+        std::string response_str = zmq_rpc_call(
+            StartupSemanticHelperEndpoint(), request_json.dump());
         return nlohmann::json::parse(response_str);
     } catch (...) {
         return {{"ok", false}, {"error", "zmq or json parse error"}};
@@ -55,7 +70,6 @@ nlohmann::json semantic_join_zmq_rpc_call(const std::string& name,
                                           const std::string& predicate,
                                           const std::string& type,
                                           const std::string& join_id) {
-    const std::string endpoint = "tcp://127.0.0.1:5555";
     nlohmann::json request_json;
     request_json["name"] = name;
     request_json["predicate"] = predicate;
@@ -69,7 +83,8 @@ nlohmann::json semantic_join_zmq_rpc_call(const std::string& name,
     request_json["values"] = arr;
 
     try {
-        std::string response_str = zmq_rpc_call(endpoint, request_json.dump());
+        std::string response_str = zmq_rpc_call(
+            StartupSemanticHelperEndpoint(), request_json.dump());
         return nlohmann::json::parse(response_str);
     } catch (...) {
         return {{"ok", false}, {"error", "zmq or json parse error"}};
